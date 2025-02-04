@@ -71,7 +71,7 @@ warnings.filterwarnings(action='ignore', category=FutureWarning)
 ## Helper functions
 ## ============================================================================
 
-def init_session_state(temp_dir: str):
+def init_session_state(temp_dir: str, demo_mode=False):
     # Initialize Streamlit Session State
     SESSION_DEFAULTS = {
         "oBis": None,
@@ -103,6 +103,7 @@ def init_session_state(temp_dir: str):
 
     st.session_state.temp_dir = temp_dir
     st.session_state.max_size = st_config.get_option("server.maxUploadSize") # Mb
+    st.session_state.demo_mode = demo_mode
 
 
 def openbis_login():
@@ -293,7 +294,7 @@ def check_openbis_login_success():
 ##
 
 
-def get_s3client(config_file, from_path=False):
+def get_s3client(config_file=None, from_path=False):
     """Read in the config file and parse the configuration settings.
 
     Args:
@@ -307,7 +308,18 @@ def get_s3client(config_file, from_path=False):
         },
     )
 
-    if from_path:
+    if config_file is None:
+        try:
+            s3_client = boto3.client(
+            service_name="s3",
+            endpoint_url=f'{COSCINE_URL}:{COSCINE_PORT}',
+            aws_access_key_id=st.secrets['s3_access_key'],
+            aws_secret_access_key=st.secrets['s3_access_secret']
+            )
+            return s3_client, st.secrets['s3_bucket'], 'S3_NFDI_DEMO_01'
+        except FileNotFoundError:
+            return None, "", ""
+    elif from_path:
         # Open file to access content
 
         with open(config_file, "r") as fh:
@@ -371,10 +383,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--temp_dir", type=str, required=False, default="./tmp",
-        help='Path to where the data will be staged (anbd later deleted)'
+        help='Path to where the data will be staged (and later deleted)'
+    )
+    parser.add_argument(
+        "--demo_mode", type=bool, required=False, default=False,
+        help='Switch to demo_mode'
     )
     args = parser.parse_args()
-    init_session_state(temp_dir=args.temp_dir)
+    init_session_state(temp_dir=args.temp_dir, demo_mode=args.demo_mode)
 
     # Page Config
 
@@ -457,7 +473,15 @@ def main():
 
     # Prompt user to upload credentials needed for upload to Coscine
 
-    if st.session_state.is_crc and not st.session_state.setup_done:
+    if st.session_state.demo_mode and not st.session_state.setup_done:
+        if not st.session_state.s3_client:
+            client, bucket, dmscode = get_s3client()
+            st.session_state.s3_client = client
+            st.session_state.s3_bucket_name = bucket
+            st.session_state.obis_dmscode = dmscode
+        response = check_s3()
+        st.session_state.setup_done = True
+    elif st.session_state.is_crc and not st.session_state.setup_done:
         with placeholder2.form("Form_S3_credentials"):
             st.write("Enter S3 storage credentials (to upload to Coscine)")
             s3_credentials = st.file_uploader(
