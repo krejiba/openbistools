@@ -256,6 +256,7 @@ def configure_download_from_coscine():
     CFG_EXP_LIST = [
         "/CRC1394/CRC1394_COSCINE/CRC1394_COSCINE_CONFIG",
         "/TRR188/TRR188_COSCINE/TRR188_COSCINE_CONFIG",
+        "/CRC1394/CRC1394_COSCINE_MATWERK/CRC1394_COSCINE_CONFIG",
     ]
     
     st.session_state.s3_download_ok = False
