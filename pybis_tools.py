@@ -3,9 +3,9 @@
 
 
 """
-    Helper code and tools, partly extracted from the PyBIS source code, 
-    used to register linked datasets in OpenBIS
-    see also: https://sissource.ethz.ch/sispub/openbis/-/blob/master/api-openbis-python3-pybis/src/python/pybis/pybis.py
+Helper code and tools, partly extracted from the PyBIS source code,
+used to register linked datasets in OpenBIS
+see also: https://sissource.ethz.ch/sispub/openbis/-/blob/master/api-openbis-python3-pybis/src/python/pybis/pybis.py
 """
 
 from pybis import Openbis
@@ -221,7 +221,7 @@ def create_obis_link_metadata(
     dms_id: dict,
     parent_ids: list,
     properties: dict,
-    sample_name: str,
+    object_name: str,
     experiment_name: str,
     data_set_code: str,
 ) -> dict:
@@ -237,7 +237,7 @@ def create_obis_link_metadata(
         dms_id (dict): Details about the external storage (DMS).
         parent_ids (list): Parents of the file to be linked.
         properties (dict): Properties of the file in the ELN (e.g., name, metadata).
-        sample_name (str): String identifier of the sample to link this file to (must specify either sample or experiment).
+        object_name (str): String identifier of the sample to link this file to (must specify either sample or experiment).
         experiment_name (str): String identifier of the experiment to link the file to (must specify either sample or experiment).
         data_set_code (str): Code of the dataset to attach the file to. If None, a new one will be created.
 
@@ -272,9 +272,9 @@ def create_obis_link_metadata(
         "@type": "as.dto.dataset.create.DataSetCreation",
     }
 
-    if sample_name is not None:
-        sample_id = oBis.sample_to_sample_id(sample_name)
-        data_set_creation["sampleId"] = sample_id
+    if object_name is not None:
+        object_id = oBis.sample_to_sample_id(object_name)
+        data_set_creation["sampleId"] = object_id
     elif experiment_name is not None:
         experiment_id = oBis.experiment_to_experiment_id(experiment_name)
         data_set_creation["experimentId"] = experiment_id
@@ -294,7 +294,7 @@ def create_obis_link_metadata(
 
 
 def create_obis_link_request(
-    obis_link_metadata: dict, file_metadata: list, pat: str
+    obis_link_metadata: dict, file_metadata: list, token: str
 ) -> dict:
     """
     Combines openBIS metadata and file metadata into the service request
@@ -303,7 +303,7 @@ def create_obis_link_request(
     Args:
         obis_link_metadata (dict): openBIS metadata and instructions for linked files.
         file_metadata (list): Metadata about the file (CRC, path on DMS).
-        pat (str): openBIS access token (session token or personal access token).
+        token (str): openBIS access token (session token or personal access token).
 
     Returns:
         dict: Request to send to the openBIS server.
@@ -317,7 +317,7 @@ def create_obis_link_request(
 
     request = {
         "method": "createDataSets",
-        "params": [pat, [data_set_creation]],
+        "params": [token, [data_set_creation]],
     }
 
     logging.debug("openBIS link request: %s" % request)
@@ -336,13 +336,12 @@ def register_file(
     dms_path: str,
     dms_id: dict,
     dss_code: str,
-    sample_name: str,
+    object_name: str,
     experiment_name: str,
     properties: dict,
     data_set_code: str,
     data_set_type: str,
     parent_ids: list,
-    token: str,
 ) -> str:
     """
     Registers the file in openBIS as a linked file on the external storage system.
@@ -355,13 +354,12 @@ def register_file(
         dms_path (str): Fully qualified path of the file on the external data store (including filename).
         dms_id (dict): Details about the external storage (DMS).
         dss_code (str): Identifier of the openBIS DSS server to handle the request.
-        sample_name (str): String identifier of the sample to link this file to (must specify either sample or experiment).
+        object_name (str): String identifier of the object to link this file to (must specify either sample or experiment).
         experiment_name (str): String identifier of the experiment to link the file to (must specify either sample or experiment).
         properties (dict): Properties of the file in the ELN (e.g., name, metadata).
         data_set_code (str): Code of the dataset to attach the file to. If None, a new one will be created.
         data_set_type (str): openBIS data type for the linked file.
         parent_ids (list): Parents of the file to be linked.
-        token (str): openBIS access token (session token or personal access token).
 
     Raises:
         Exception: If the registration of the linked file in openBIS fails.
@@ -377,7 +375,7 @@ def register_file(
         dss_code=dss_code,
         parent_ids=parent_ids,
         properties=properties,
-        sample_name=sample_name,
+        object_name=object_name,
         experiment_name=experiment_name,
         data_set_code=data_set_code,
         data_set_type=data_set_type,
@@ -385,7 +383,9 @@ def register_file(
     logging.debug("openBIS link metadata: \n%s" % obis_link_metadata)
 
     obis_link_request = create_obis_link_request(
-        obis_link_metadata=obis_link_metadata, file_metadata=file_metadata, pat=token
+        obis_link_metadata=obis_link_metadata,
+        file_metadata=file_metadata,
+        token=oBis.token,
     )
     logging.debug("openBIS link request: \n%s" % obis_link_request)
 
@@ -400,8 +400,7 @@ def register_file(
 
         # openBIS permID of the newly linked dataset
 
-        linked_dataset = oBis.get_dataset(response[0]["permId"])
-        permid_linked_dataset = linked_dataset.permId
+        permid_linked_dataset = oBis.get_dataset(response[0]["permId"]).permId
         logging.debug("New openBIS permID %s" % permid_linked_dataset)
     except Exception as e:
         logging.error("Something went wrong in POST command: %s" % e)
@@ -441,13 +440,12 @@ def check_role(
 
     person = oBis.get_person(username)
 
-    # Get the pandas dataframe rather than the pyBis Things
-
+    # Get the pandas dataframe rather than the pyBIS Things
+    roles = person.get_roles().df
     if len(project) > 0:
-        roles = person.get_roles().df
         roles = roles[roles.project == project]
     elif len(space) > 0:
-        roles = person.get_roles(space=space).df
+        roles = roles[roles.space == space]
     else:
         raise ValueError("Either a space or a project needs to be provided")
     user_role = roles.role
@@ -468,9 +466,9 @@ def upload_data(
     filename_fqdn: str,
     ds_type: str,
     properties: dict,
-    parent_ids: list = [],
     object=None,
     experiment=None,
+    parent_ids: list = [],
 ) -> str:
     """
     Uploads a file directly to the openBIS server.
@@ -489,7 +487,7 @@ def upload_data(
         Exception: insufficient privileges or neither object or experiment is specified
 
     Returns:
-        str: permID of the newly uploaded dataset
+        str: permId of the newly uploaded dataset
     """
 
     if check_role(oBis=oBis, username=username) == False:
@@ -498,14 +496,12 @@ def upload_data(
             "User has no permission to upload data directly to OpenBIS server"
         )
     if object == None and experiment == None:
-        print("either exp or obj")
-        logging.critical("Must specify either object or experiment to upload data to.")
+        # logging.critical("Must specify either object or experiment to upload data to.")
         raise Exception("Must specify either object or experiment to upload data to.")
     logging.debug("Properties and metadata for the file to be uploaded:")
     logging.debug(properties)
 
-    # Note: until "save" is called, ds_new has no type, etc.
-    #      hence, we also can't print the object, etc
+    # Note: until "save" is called, ds_new has no type, no permId etc.
 
     ds_new = oBis.new_dataset(
         type=ds_type,
@@ -514,7 +510,8 @@ def upload_data(
         files={filename_fqdn},
         props=properties,
     )
-    perm_id = ds_new.save()
+    ds_new.save()
+    perm_id = ds_new.permId
     logging.info("Created new dataset with permID %s" % perm_id)
 
     # Add any parent datasets (e.g. if we have a derived dataset)
@@ -526,12 +523,12 @@ def upload_data(
 
 
 def get_full_identifier(
-    pybis_experiment_or_collection: Experiment,
-    pybis_object: Sample,
+    exp_dict: dict,
+    obj_dict: dict,
     sep: str = "//",
-    include_permid_suffix: bool = False, 
+    include_permid_suffix: bool = False,
 ):
-    """Returns an OpenBIS identifier that better reflects hierarchy.
+    """Returns an OpenBIS identifier that better reflects hierarchy (referred to as Path in ELN-LIMS GUI).
 
     In OpenBIS, the identifiers have 3 components.
         /SPACE/PROJECT/EXPERIMENT (Experiment = Collection)
@@ -541,37 +538,39 @@ def get_full_identifier(
         /SPACE/PROJECT/EXPERIMENT/OBJECT
     """
 
-    project_code = pybis_experiment_or_collection.project.code
-    experiment_or_collection_code = pybis_experiment_or_collection.code
-    object_code = pybis_object.code
+    space_code = exp_dict["space"]
+    project_code = exp_dict["project"]
+    experiment_or_collection_code = exp_dict["code"]
+    object_code = obj_dict["code"]
+    object_permid = obj_dict["permId"]
 
     # Fetch names for display purposes
 
-    experiment_or_collection_name = pybis_experiment_or_collection.p.get("$name")
-    object_name = pybis_object.p.get("$name")
+    experiment_or_collection_name = exp_dict.get("$NAME")
+    object_name = obj_dict.get("$NAME")
 
     # Create name from code if necessary
 
-    if experiment_or_collection_name is None:
-        parts = pybis_experiment_or_collection.code.split("_")
+    if experiment_or_collection_name in (None, ""):
+        parts = experiment_or_collection_code.split("_")
         parts = [part.title() for part in parts]
         experiment_or_collection_name = " ".join(parts)
 
-    if object_name is None:
-        object_name = pybis_object.code
-    
+    if object_name in (None, ""):
+        object_name = object_code
+
     # Create full identifier
 
-    object_identifier = pybis_object.identifier
+    object_identifier = obj_dict["identifier"]
     new_ending = f"{experiment_or_collection_code}/{object_code}"
     full_identifier = object_identifier.replace(object_code, new_ending)
 
-    # We drop the space for the display name
-    
-    display_name = sep.join([project_code, experiment_or_collection_name, object_name])
+    # Create display name with custom seperator
+    display_name = sep.join(
+        [space_code, project_code, experiment_or_collection_name, object_name]
+    )
     if include_permid_suffix:
-        if pybis_object is not None:
-            display_name += " (%s) " % pybis_object.permId
+        display_name += f" ({object_permid})"
 
     return full_identifier, display_name
 

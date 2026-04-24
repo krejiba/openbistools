@@ -4,9 +4,12 @@ import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from botocore.exceptions import ClientError
+from boto3.exceptions import S3UploadFailedError
 import pandas as pd
 import uuid
 import warnings
+
+DEMO_METADATA_URL = "https://sfb1394-metadata.streamlit.app"
 
 # PyBIS helper code we need to register the file
 
@@ -27,18 +30,8 @@ from data_handling_tools import get_metadata
 
 
 from Hello import find_relevant_locations, ALLOWED_OBJECT_TYPES
-TERMINAL_OBJECT_TYPES = [
-    'ELECTRON_MICROSCOPE', 
-    'MECH_TEST_DEVICE',
-    'FURNACE',
-    'INSTRUMENT',
-    'CHEMICAL',
-    'PREPARATION_MATERIAL',
-    'SOFTWARE',
-    'PUBLICATION',
-]
 
-warnings.filterwarnings(action='ignore', category=FutureWarning)
+warnings.filterwarnings(action="ignore", category=FutureWarning)
 
 
 # rewrite as stages?
@@ -50,142 +43,87 @@ warnings.filterwarnings(action='ignore', category=FutureWarning)
 
 
 def format_func(code: str) -> str:
-    """Maps OpenBIS dataset type codes to corresponding display names."""
-    display_name = st.session_state.oBis.get_dataset_type(code).description
-    if display_name is not None:
-        return display_name
+    """Maps OpenBIS dataset type codes to corresponding display text."""
+    display_text = st.session_state.oBis.get_dataset_type(code).description
+    if display_text is not None:
+        return display_text
     match code:
-        case "SEM_DATA":
-            return "Scanning Electron Microscopy (SEM)"
-        case "TEM_DATA":
-            return "(Scanning) Transmission Electron Microscopy (TEM/STEM)"
-        case "EBSD_EXP_DATA":
-            return "Electron Backscatter Diffraction (EBSD) - Experimental"
-        case "EBSD_SIM_INTERNAL":
-            return "EBSD Simulation - Internal File"
-        case "EBSD_SIM_MASTERPATTERN":
-            return "EBSD Simulation - Master Pattern"
-        case "EBSD_SIM_SCREENPATTERN":
-            return "EBSD Simulation - Screen Pattern"
-        case "EDS_DATA":
-            return "Energy Dispersive Spectroscopy (EDS/EDX)"
-        case "EBSD-EDS_DATA":
-            return "EBSD with EDS/EDX"
-        case "STEM-EDS_DATA":
-            return "STEM with EDS/EDX"
-        case "LOM_DATA":
-            return "Light / Optical Microscopy"
-        case "NANOINDENTATION_DATA":
-            return "Nano Indentation"
-        case "PILLAR_COMPRESSION_DATA":
-            return "Micro Pillar Compression"
-        case "APT_DATA":
-            return "Atom Probe Tomography"
-        case "XRD-THETA_DATA":
-            return "Theta Scan | X-ray Diffraction"
-        case "XRD-TEXT_DATA":
-            return "Texture Analysis | X-ray Diffraction"
-        case "ELECTROCHEM_DATA":
-            return "Electrochemical Data"
-        case "CRYS-STRUCT_DATA":
-            return "Crystal Structure File"
-        case "SIM_JOB":
-            return "Archive containing Simulation Files"
-        case "SIM_ARTEFACT":
-            return "Output file from simulation"
-        case "SLIP-LINE_DATA":
-            return "Slip Line Analysis Files"
+        # case "CODE":
+        #     return "DISPLAY_TEXT"
+
         case _:
             return " ".join(part.capitalize() for part in code.split("_"))
 
 
 def display_linked_samples():
-
     """Presents information about linked samples"""
     full_identifier = st.session_state.experiments[st.session_state.experiment]
-    experiment_code, object_code = get_info_from_identifier(full_identifier)
-    
-    if object_code is not None:
-        object = st.session_state.oBis.get_object(object_code)
+    exp_identifier, obj_identifier = get_info_from_identifier(full_identifier)
+
+    if obj_identifier is not None:
+        openbis_object = st.session_state.oBis.get_object(obj_identifier)
+
         # User uploads data to Sample (e.g. structure file)
-        if object.type == "SAMPLE":
-            msg = f"You will upload data to sample *{object.permId}*.  \n"
-            sample_name = object.p["$name"].strip()  # Compulsory
-            sample_dim = object.p.sample_dim.replace("*", "x")  # Compulsory
-            comments = object.p["comments"]  # Optional
+        if openbis_object.type == "SAMPLE":
+            msg = f"You will upload data to sample *{openbis_object.permId}*.  \n"
+            sample_name = openbis_object.p["$name"].strip()  # Compulsory
+            sample_dim = openbis_object.p.sample_dim.replace("*", "x")  # Compulsory
+            comments = openbis_object.p.comments  # Optional
             comments = "None" if comments is None else comments.strip()
             comments = comments[:100]
-            props = object.p()
+            props = openbis_object.p()
             props = {
                 k: v[:5]
                 for k, v in sorted(props.items())
                 if v is not None and k.startswith("element")
             }
             desc = "".join(props.values())
-            msg = f"You will upload data to  Sample **{sample_name}**  *{object.permId}*  \n"
+            msg = f"You will upload data to Sample **{sample_name}** *{openbis_object.permId}*  \n"
             msg += f"├──  Composition: **{desc}**  \n"
             msg += f"├──  Dimensions: **{sample_dim}**  \n"
             msg += f"├──  Comments: **{comments}**  \n"
-            msg += f"Please update the sample if that is not the desired outcome."
+            msg += f"Please change the sample if that is not the desired outcome."
             st.markdown(msg)
             return
 
-    
-    def find_linked_samples(object_code, visited=None, depth=0):
-        """Recursively find linked samples."""
-        # Initialize set to keep track of visited objects
-        if visited is None:
-            visited = set()
-        
-        if object_code in visited:
-            return [], depth
-        
-        visited.add(object_code)
+    def find_linked_samples(object_code):
+        """Returns a list of samples directly linked to the selected object."""
 
         object = st.session_state.oBis.get_object(object_code)
-
         samples = []
-        relative_code = None
-
-        # Look for samples in the parents annd children
-        for relative_code in object.children + object.parents:
-            if relative_code not in visited:
-                relative = st.session_state.oBis.get_object(relative_code)
-                if relative.type not in ALLOWED_OBJECT_TYPES:
-                    continue
-                if relative.type == "SAMPLE":
-                    samples.append(relative)
-            
-        if samples:
-            return samples, depth + 1
-        for relative_code in object.children + object.parents:
-            relative = st.session_state.oBis.get_object(relative_code)
-            if relative.type in TERMINAL_OBJECT_TYPES:
+        relative_identifier = None
+        for relative_identifier in object.children + object.parents:
+            relative = st.session_state.oBis.get_object(relative_identifier)
+            if relative.type not in ALLOWED_OBJECT_TYPES:
                 continue
-            linked_samples, related_depth = find_linked_samples(relative_code, visited, depth + 1)
-            samples.extend(linked_samples)
-            if samples:
-                return samples, related_depth
-        else:
-            return samples, depth
+            if relative.type == "SAMPLE":
+                samples.append(relative)
+        return samples
 
-    try:
-        object = st.session_state.oBis.get_object(object_code)
-        samples, depth = find_linked_samples(object_code)
-        object_or_experiment = object
-        is_default_experiment = False
-    except AttributeError:
-        experiment = st.session_state.oBis.get_experiment(experiment_code)
-        samples, depth = experiment.get_objects(type="SAMPLE"), 1
-        object_or_experiment = experiment
-        is_default_experiment = True
+    with st.spinner("Finding samples..."):
+        try:
+            openbis_object = st.session_state.oBis.get_object(obj_identifier)
+            samples = find_linked_samples(obj_identifier)
+            object_or_experiment = openbis_object
+            is_default_experiment = False
+        except AttributeError:
+            experiment = st.session_state.oBis.get_experiment(exp_identifier)
+            samples = experiment.get_objects(type="SAMPLE")
+            object_or_experiment = experiment
+            is_default_experiment = True
     msg = f"You will upload data to experiment *{object_or_experiment.permId}*.  \n"
     for sample in samples:
         sample_name = sample.p["$name"].strip()  # Compulsory
         sample_dim = sample.p.sample_dim.replace("*", "x")  # Compulsory
-        comments = sample.p["comments"]  # Optional
-        comments = "None" if comments is None else comments.strip()
-        comments = comments[:100]
+        sample_subtype = sample.p.sample_subtype  # Optional
+        comments = sample.p.comments  # Optional
+        if comments:
+            comments = (
+                "None" if comments is None else comments.strip().replace("\n", ", ")
+            )
+            comments = comments[:100]
+        else:
+            comments = "None"
         props = sample.p()
         props = {
             k: v[:5]
@@ -193,18 +131,22 @@ def display_linked_samples():
             if v is not None and k.startswith("element")
         }
         desc = "".join(props.values())
-        if depth == 1:
-            msg += f"├──  Directly linked to Sample **{sample_name}**  *{sample.permId}*  \n"
-        else:
-            msg += f"├──  Linked to Sample **{sample_name}**  *{sample.permId}* with {depth - 1} intermediate experiment  \n"
+        if sample_subtype is not None:
+            sample_name = sample_name + f" ({sample_subtype})"
+        msg += f"├──  Directly linked to Sample **{sample_name}** *{sample.permId}*  \n"
         msg += f"├────  Composition: **{desc}**  \n"
         msg += f"├────  Dimensions: **{sample_dim}**  \n"
         msg += f"├────  Comments: **{comments}**  \n"
     msg += f"Please update the experiment if that is not the desired outcome."
     if len(samples) == 0:
         insert_text = "default" if is_default_experiment else ""
-        st.warning("No samples are linked to this " + insert_text + " experiment!")
-    st.markdown(msg, help="Wrong samples can be displayed here (especially if indirectly linked). Please report this!")
+        st.warning(
+            "No samples are direclty linked to this " + insert_text + " experiment!"
+        )
+    st.markdown(
+        msg,
+        help="Only directly linked samples are fetched.",
+    )
 
 
 def link_file(
@@ -254,56 +196,75 @@ def link_file(
     full_identifier = st.session_state.experiments[st.session_state.experiment]
     experiment_name, object_name = get_info_from_identifier(full_identifier)
 
-    token = st.session_state.obis_token
+    token = st.session_state.openbis_token
 
-    if file_metadata is not None:
-        linked_permID = register_file(
-            oBis=st.session_state.oBis,
-            file_metadata=file_metadata,
-            dms_path=dms_path,
-            dms_id=dms_id,
-            dss_code=dss_code,
-            sample_name=object_name,
-            experiment_name=experiment_name,
-            properties=properties,
-            data_set_code=None,
-            data_set_type=st.session_state.ds_type,
-            parent_ids=parent_ids,
-            token=token,
-        )
-        placeholder.success(
-            f"File added as link in openBIS with ID {linked_permID}",
-            icon="✅",
-        )
+    ## upload file to S3
 
-        ## upload file to S3
-
+    try:
         with st.spinner("Uploading data to S3..."):
             response = st.session_state.s3_client.upload_file(
                 file_name_fqdn,
                 st.session_state.s3_bucket_name,
                 new_file_name,
             )
-        # check if the file is actually there
-        # by calling 'head_object' on that file in our bucket
 
-        try:
-            st.session_state.s3_client.head_object(
-                Bucket=st.session_state.s3_bucket_name, Key=new_file_name
+        if file_metadata is not None:
+            linked_permID = register_file(
+                oBis=st.session_state.oBis,
+                file_metadata=file_metadata,
+                dms_path=dms_path,
+                dms_id=dms_id,
+                dss_code=dss_code,
+                object_name=object_name,
+                experiment_name=experiment_name,
+                properties=properties,
+                data_set_code=None,
+                data_set_type=st.session_state.ds_type,
+                parent_ids=parent_ids,
             )
-        except ClientError as e:
-            st.write(e.response)
-            error_code = e.response["Error"]["Code"]
-            if error_code == "403":
-                st.error("Access denied!", icon="🔥")
-            elif error_code == "SignatureDoesNotMatch":
-                st.error("Access denied!", icon="🔥")
-            elif error_code == "404":
-                st.error("Failed to upload file!", icon="🔥")
-        else:
             placeholder.success(
-                f"File uploaded successfully as {new_file_name}", icon="✅"
+                f"File added as link in openBIS with ID {linked_permID}",
+                icon="✅",
             )
+
+            # check if the file is actually there
+            # by calling "head_object" on that file in our bucket
+
+            try:
+                st.session_state.s3_client.head_object(
+                    Bucket=st.session_state.s3_bucket_name, Key=new_file_name
+                )
+                url = st.session_state.s3_client.generate_presigned_url(
+                    "get_object",
+                    Params={
+                        "Bucket": st.session_state.s3_bucket_name,
+                        "Key": new_file_name,
+                    },
+                    ExpiresIn=604800,  # 1 WEEK
+                    HttpMethod="GET",
+                )
+                ds = st.session_state.oBis.get_dataset(linked_permID)
+                ds.p["s3_download_link"] = url
+                ds.save()
+            except ClientError as e:
+                st.write(e.response)
+                error_code = e.response["Error"]["Code"]
+                if error_code == "403":
+                    st.error("Access denied!", icon="🔥")
+                elif error_code == "SignatureDoesNotMatch":
+                    st.error("Access denied!", icon="🔥")
+                elif error_code == "404":
+                    st.error("Failed to upload file!", icon="🔥")
+            else:
+                placeholder.success(
+                    f"File uploaded successfully as {new_file_name}", icon="✅"
+                )
+    except S3UploadFailedError:
+        st.error(
+            "S3 upload client was not set up properly! Please check the config file."
+        )
+        linked_permID = None
+
     # remove local file
 
     os.unlink(file_name_fqdn)
@@ -386,7 +347,9 @@ st.set_page_config(
 try:
     _ = st.session_state.setup_done
     st.session_state.prefix = None
-    if st.session_state.get('uploader_key') is None:
+    if st.session_state.get("options") is None:
+        st.session_state.options = {}
+    if st.session_state.get("uploader_key") is None:
         st.session_state.uploader_key = "uploader"
 except AttributeError as e:
     st.switch_page(page="Hello.py")
@@ -395,11 +358,17 @@ st.sidebar.write("Logged into openBIS: ", st.session_state.logged_in)
 st.sidebar.write("OpenBIS Upload OK: ", st.session_state.openbis_upload_allowed)
 st.sidebar.write("S3 Upload OK: ", st.session_state.s3_upload_ok)
 st.sidebar.write("S3 Download OK: ", st.session_state.s3_download_ok)
+st.sidebar.write("S3 Resource: ", st.session_state.obis_dmscode)
+st.sidebar.write("Upload to Samples: ", st.session_state.include_samples)
+
 
 ##  Form 1: Log into openBIS and configure S3
 
 
 st.title("Register Data in openBIS")
+st.write(
+    "Please use script-based methods if your data is larger than 5 GB in total (at least until new resources are available)"
+)
 
 with st.form("Form_DS_Exp"):
 
@@ -429,7 +398,7 @@ with st.form("Form_DS_Exp"):
         )
     st.selectbox(
         "Choose a dataset type",
-        st.session_state.ds_type_set,
+        sorted(st.session_state.ds_type_set, key=format_func),
         index=None,
         placeholder="Select Dataset Type",
         key="ds_type",
@@ -477,7 +446,32 @@ with st.form("Form_DS_Exp"):
                 # We show linked samples to help prevent erroneous uploads
 
                 display_linked_samples()
+
                 st.session_state.disable_upload = False
+                if st.session_state.ds_type in [
+                    "SEM_DATA",
+                    "TEM_DATA",
+                    "STEM-EDS_DATA",
+                ]:
+                    st.warning(
+                        "STEM acquired in an SEM should should be uploaded as SEM"
+                    )
+                if st.session_state.ds_type in [
+                    "EBSD_EXP_DATA",
+                    "EDS_DATA",
+                    "EBSD-EDS_DATA",
+                ]:
+                    st.warning(
+                        "Please note that we have these dataset types: EBSD, EDS and EBSD+EDS"
+                    )
+                if st.session_state.ds_type == "ELECTROCHEM_DATA":
+                    st.warning(
+                        "Please note that we have these dataset types: SVET, SIET, PDP, OCP, XPS, XRR, EIS"
+                    )
+                if st.session_state.ds_type == "RAW_DATA":
+                    st.warning("Please use domain-specific datasetTypes instead")
+
+
 ## Form 3: Choose metadata extractor, upload file to Streamlit,
 ##         upload to Coscine and link data (and metadata) in openBIS
 
@@ -502,46 +496,58 @@ with st.form("Form_Link"):
         disabled=st.session_state.disable_upload,
     )
 
-    if st.session_state.ds_type == 'APT_DATA':
+    if st.session_state.ds_type == "APT_DATA":
         oBis = st.session_state.oBis
-        st.text('Enter metadata manually')
+        st.text("Enter metadata manually")
         dataset_type = oBis.get_dataset_type(st.session_state.ds_type)
-        assignments = dataset_type.get_property_assignments().df   
-        props = assignments.propertyType.to_list()
-        manual = [p for p in props if p.startswith('TEMP_')]
+        assignments = dataset_type.get_property_assignments().df
+        props = assignments.code.to_list()
+        manual = [p for p in props if p.startswith("TEMP_")]
         data = [
-            [code,
-             oBis.get_property_type(code).label,
-             None,
-             oBis.get_terms(oBis.get_property_type(code).vocabulary).df.code.to_list() if oBis.get_property_type(code).dataType == "CONTROLLEDVOCABULARY" else None
-             ]  for code in manual
+            [
+                code,
+                oBis.get_property_type(code).dataType,
+                oBis.get_property_type(code).label,
+                None,
+                (
+                    oBis.get_terms(
+                        oBis.get_property_type(code).vocabulary
+                    ).df.code.to_list()
+                    if oBis.get_property_type(code).dataType == "CONTROLLEDVOCABULARY"
+                    else None
+                ),
+            ]
+            for code in manual
         ]
-        manual_df = pd.DataFrame(data, columns=['Code', 'Field', 'Value', 'Possible Values'])
-        manual_df.set_index('Code', drop=True, inplace=True)
+        manual_df = pd.DataFrame(
+            data, columns=["Code", "Datatype", "Field", "Value", "Possible Values"]
+        )
+        manual_df.set_index("Code", drop=True, inplace=True)
         manual_entry = st.data_editor(
-            key='manual_metadata',
+            key="manual_metadata",
             data=manual_df,
             column_config={
-                'Code': None,
-                'Field': st.column_config.TextColumn(disabled=True),
-                'Value': st.column_config.Column(width="medium"),
-                'Possible Values': st.column_config.Column(width="large")
+                "Code": None,
+                "Datatype": None,
+                "Field": st.column_config.TextColumn(disabled=True),
+                "Value": st.column_config.Column(width="medium"),
+                "Possible Values": st.column_config.Column(width="large"),
             },
-
         )
-        # FIXME Add data validation steps
+        real_values = manual_entry.loc[manual_entry.Datatype == "REAL", "Value"]
+        real_values = real_values.str.replace(",", ".")
+        manual_entry.loc[manual_entry.Datatype == "REAL", "Value"] = real_values
     else:
         manual_entry = None
-
-
     if st.session_state.s3_upload_ok:
-        prefix = st.text_input(
-            "Enter an additional prefix for the file",
-            help="You can use this to easily find the files in the Coscine User Interface, if needed",
-            placeholder="optional",
-            key="prefix",
-            disabled=st.session_state.disable_upload,
-        )
+        prefix = ""
+        # prefix = st.text_input(
+        #     "Enter an additional prefix for the file",
+        #     help="You can use this to easily find the files in the Coscine User Interface, if needed",
+        #     placeholder="optional",
+        #     key="prefix",
+        #     disabled=st.session_state.disable_upload,
+        # )
     metadata_extractors = []
     match st.session_state.ds_type:
         case "SEM_DATA":
@@ -554,18 +560,34 @@ with st.form("Form_Link"):
                 "MCh FEI Helios",
                 "MPIE FEI Helios",
                 "MPIE FEI Scios",
+                "MPIE FEI Scios",
+                "MPIE Zeiss Sigma",
             ]
         case "TEM_DATA":
             metadata_extractors = [
                 "Thermo Scientific Velox Software emd",
-                "Gatan Microscopy Suite dm3/dm4"
+                "Gatan Microscopy Suite dm3/dm4",
             ]
         case "EBSD_EXP_DATA":
-            metadata_extractors = ["EDAX APEX zip"]
+            metadata_extractors = [
+                "EDAX TEAM zip",
+                "EDAX edaxh5",
+                "AZtecCrystal h5iona",
+            ]
         case "EBSD-EDS_DATA":
-            metadata_extractors = ["EDAX APEX zip"]
+            metadata_extractors = [
+                "EDAX TEAM zip",
+                "EDAX edaxh5",
+                "AZtecCrystal h5iona",
+            ]
+        case "EDS_DATA":
+            metadata_extractors = ["EDAX TEAM zip"]
         case "EBSD_SIM_INTERNAL" | "EBSD_SIM_MASTERPATTERN" | "EBSD_SIM_SCREENPATTERN":
             metadata_extractors = ["EMSOFT_H5"]
+        case "CRYS-STRUCT_DATA":
+            metadata_extractors = ["VASP", "LAMMPS"]
+        case "INTERATOMIC_POTENTIAL_DATA":
+            metadata_extractors = ["PACEMAKER"]
     st.selectbox(
         "Choose a metadata extractor",
         metadata_extractors,
@@ -573,9 +595,24 @@ with st.form("Form_Link"):
         placeholder="Choose an extractor",
         key="extractor",
         disabled=not len(metadata_extractors),
-        help="Try out [here](https://sfb1394-metadata.streamlit.app/) first",
+        help=f"Try out [here]({DEMO_METADATA_URL}) first",
     )
 
+    if st.session_state.ds_type == "CRYS-STRUCT_DATA":
+        oBis = st.session_state.oBis
+        styles = sorted(
+            oBis.get_terms(
+                oBis.get_property_type("LAMMPS_UNIT_STYLE").vocabulary
+            ).df.code.to_list()
+        )
+        lammps_unit_style = st.selectbox(
+            "Choose LAMMPS unit style",
+            options=styles,
+            index=styles.index("METAL"),
+            # index=None,
+        )
+    else:
+        lammps_unit_style = None
     uploaded_files = st.file_uploader(
         "Choose a file",
         accept_multiple_files=True,
@@ -586,14 +623,17 @@ with st.form("Form_Link"):
     )
 
     s3_upload_allowed = st.session_state.s3_upload_allowed
+    s3_upload_configured = st.session_state.s3_upload_ok
     openbis_upload_allowed = st.session_state.openbis_upload_allowed
+    if s3_upload_allowed and not s3_upload_configured:
+        st.warning("Please set up s3 properly")
 
-    if s3_upload_allowed and openbis_upload_allowed:
+    if s3_upload_allowed and s3_upload_configured and openbis_upload_allowed:
         upload_target = st.radio(
             "Choose upload target",
             ["Coscine", "openBIS"],
             captions=[
-                "Upload to S3 and register in openBIS (large data, > 2GB)",
+                "Upload to S3 and register in openBIS (if your project has Coscine Storage)",
                 "Upload to openBIS directly",
             ],
             index=0,
@@ -615,13 +655,54 @@ with st.form("Form_Link"):
     )
 
     if register_btn:
+        is_manual_valid = True
+        is_name_valid = True
+
+        property_types = (
+            st.session_state.oBis.get_dataset_type(st.session_state.ds_type)
+            .get_property_assignments()
+            .df
+        )
+        property_types.set_index("code", inplace=True)
+
+        # Validate manually entered metadata
+
+        if manual_entry is not None:
+            for _, row in manual_entry.iterrows():
+                if row["Value"] is not None and row["Value"] != "":
+
+                    if row["Datatype"] == "CONTROLLEDVOCABULARY":
+                        if row["Value"] not in row["Possible Values"]:
+                            property_label = row["Field"]
+                            value = row["Value"]
+                            values = row["Possible Values"]
+                            st.error(
+                                f"{property_label} value: {value} is not one of {values}!"
+                            )
+                            is_manual_valid = False
+                    if row["Datatype"] == "INTEGER":
+                        property_label = row["Field"]
+                        value = row["Value"]
+                        if not value.isnumeric():
+                            st.error(f"{property_label} value: {value} not an integer!")
+                            is_manual_valid = False
+                    if row["Datatype"] == "REAL":
+                        property_label = row["Field"]
+                        value = row["Value"]
+                        try:
+                            float(value)
+                        except:
+                            st.error(f"{property_label} value: {value} not a decimal!")
+                            is_manual_valid = False
         if data_set_name is None or data_set_name == "":
             st.error("Please assign a meaningful name before registering the data")
-        else:
+            is_name_valid = False
+        if is_name_valid and is_manual_valid:
             data_set_name = data_set_name.strip()
             if upload_target == "openBIS":
                 data_set_name = data_set_name.replace(",", "")
             counter = 0
+            permids = []
             if uploaded_files is not None:
                 uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
             progress_text = "Upload ongoing. Please wait."
@@ -659,26 +740,41 @@ with st.form("Form_Link"):
                     "$name": data_set_name + "_" + str(counter),
                     "comments": st.session_state.data_set_comments,
                 }
+                if lammps_unit_style is not None:
+                    properties["lammps_unit_style"] = lammps_unit_style
+                    st.session_state.options["lammps_unit_style"] = (
+                        lammps_unit_style.lower()
+                    )
                 if manual_entry is not None:
                     for _, row in manual_entry.iterrows():
-                        if row['Value'] is not None:
-                            properties[row.name.lower()] = row['Value']
+                        if row["Value"] is not None and row["Value"] != "":
+                            if row["Datatype"] == "INTEGER":
+                                value = int(row["Value"])
+                            else:
+                                value = row["Value"]
+                            properties[row.name.lower()] = value
                 metadata_dict = {}
 
                 file_name_fqdn = st.session_state.temp_dir + "/" + file_name
 
-                metadata_dict = get_metadata(
-                    file_name_fqdn=file_name_fqdn,
-                    data_set_type=st.session_state.ds_type,
-                    metadata_parser=st.session_state.extractor,
-                )
-                # st.write('Metadata: ', metadata_dict)
-
-                # Convert decimal to string (to avoid serialization problem)
+                try:
+                    metadata_dict = get_metadata(
+                        file_name_fqdn=file_name_fqdn,
+                        data_set_type=st.session_state.ds_type,
+                        metadata_parser=st.session_state.extractor,
+                        options=st.session_state.options,
+                    )
+                except Exception as e:
+                    st.toast(e)
+                # Convert decimal to float as required by pybis 1.37.0
+                # FIXME Add types to metadata parsers
 
                 for k, v in metadata_dict.items():
-                    if isinstance(v, Decimal):
-                        metadata_dict[k] = str(v)
+                    if (
+                        v is not None
+                        and property_types.loc[k.upper(), "dataType"] == "REAL"
+                    ):
+                        metadata_dict[k] = float(v)
                 # add metadata to properties
 
                 properties = {**properties, **metadata_dict}
@@ -709,28 +805,19 @@ with st.form("Form_Link"):
                         properties=properties,
                         placeholder=placeholder,
                     )
-                    url = st.session_state.s3_client.generate_presigned_url(
-                        "get_object",
-                        Params={"Bucket": st.session_state.s3_bucket_name, "Key": prefix + file_name},
-                        ExpiresIn=604800,
-                        HttpMethod="GET",
-                    )
-                    ds = st.session_state.oBis.get_dataset(permid)
-                    ds.set_props({"s3_download_link": url}),
-                    ds.save()
-
                 time.sleep(1)
                 placeholder.empty()
 
-                # st.write('File uploaded to openBIS with permID: ', permID)
+                # st.write("File uploaded to openBIS with permID: ", permID)
 
+                permids.append(permid)
                 counter = counter + 1
             progress_bar.empty()
-            if counter > 0:
+            if counter > 0 and None not in permids:
                 st.success(
-                    f"Files added succesfully " \
-                        "(Click on Submit before uploading new files, " \
-                            "This will remove the already uploaded files)",
+                    f"Files added succesfully "
+                    "(Click on Submit before uploading new files, "
+                    "This will remove the already uploaded files)",
                     icon="✅",
                 )
         st.session_state.uploader_key = uuid.uuid4()

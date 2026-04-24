@@ -332,13 +332,13 @@ def get_metadata(filename, keys):
         "Liner Tube": "EXTRACTION_VOLTAGE",
         "Mag": "MAGNIFICATION_REAL",
         "Reference Mag": "MAGNIFICATIONREFERENCE",
-        "Scan Speed": "SCAN_SPEED",
+        "Scan Speed": "SCAN_SPEED",  # 1 - 15
         "Scan Rotation": "SCAN_ROTATION",
         "ScanGen Type": "SCAN_MODE",
         # "Sem": "DEVICE_NAME",
         "Spot Size": "SPOT_SIZE_SETTING",
         "Stage at R": "STAGE_ROTATION",
-        "Stage at T": "STAGE_TILT_A",
+        "Stage at T": "STAGE_TILT_A",  # Always zero, Manually adjusted
         "Stage at X": "STAGE_X_MM",
         "Stage at Y": "STAGE_Y_MM",
         "Stage at Z": "STAGE_Z_MM",
@@ -358,8 +358,8 @@ def get_metadata(filename, keys):
 
     # Static information not found in the TIF - Change if using another device
     metadata_dict["DEVICE_MANUFACTURER"] = "ZEISS"
-    metadata_dict["DEVICE_NAME"] = "Supra 55 VP"
-    metadata_dict["INSTITUTION"] = "KKS"
+    metadata_dict["DEVICE_NAME"] = "Sigma 500"
+    metadata_dict["INSTITUTION"] = "MPIE"
 
     # ############################ Parse Tif File ############################
 
@@ -417,83 +417,7 @@ def get_metadata(filename, keys):
 
     # ############################# Infer Values #############################
 
-    # Locate Databar Leo - compatible with Jython
-
-    # Define functions to bypass using numpy
-    diff = lambda arr: [arr[i + 1] - arr[i] for i in range(len(arr) - 1)]
-
-    def shape(collection):
-        """Determines the shape of a nested collection of Python scalars"""
-        if isinstance(collection, list) or isinstance(collection, tuple):
-            outermost_dim = len(collection)
-            if outermost_dim:
-                inner_shape = shape(collection[0])
-            else:
-                return ()
-            return (outermost_dim, *inner_shape)
-        else:
-            return ()
-
-    def correlate(a, v):
-        len_a, len_v = len(a), len(v)
-        result = []
-        for k in range(-len_v, len_a):
-            sum_val = 0
-            for n in range(len_v):
-                sum_val += a[n + k] * v[n] if 0 <= n + k < len_a else 0
-            result.append(sum_val)
-        return result
-
-    def indices_of_n_consecutive_values(arr, n, value):
-        find = [1 for _ in range(n)]
-        result = [arr[i] == value for i in range(len(arr))]
-        result = correlate(result, find)
-        result = [result[i] == n for i in range(len(result))]
-        return result
-
-    # Get image array from tif using oly the Python Standard Library
-    img = get_tif_image_array(filename)
-
-    img_shape = shape(img)  # HWC or HW;
-
-    ndim = len(img_shape)
-    if ndim == 3:
-        first_column = [img[i][0][0] for i in range(img_shape[0])]
-    elif ndim == 2:
-        first_column = [img[i][0] for i in range(img_shape[0])]
-
-    index_lower_quarter = len(first_column) * 3 // 4
-    lower_quarter = first_column[index_lower_quarter:]
-    derivative = diff(lower_quarter)
-
-    min_num_zeros = 50
-    zero_indices = indices_of_n_consecutive_values(
-        derivative,
-        n=min_num_zeros,
-        value=0,
-    )
-    metadata_dict["HAS_DATABAR"] = any(zero_indices)
-    if any(zero_indices):
-
-        # We only keep the last sequence of zeros
-        found = False
-        for i in range(len(zero_indices) - 1, -1, -1):
-            if zero_indices[i]:
-                found = True
-            elif found:
-                break
-        for j in range(i, -1, -1):
-            zero_indices[j] = False
-
-        indices = list(range(len(zero_indices)))
-        zero_indices = [i for i, j in zip(indices, zero_indices) if j]
-        start = index_lower_quarter + min(zero_indices) - min_num_zeros
-        end = index_lower_quarter + max(zero_indices)
-        metadata_dict["DATABAR_SIZE"] = end - start + 1
-        metadata_dict["DATABAR_START"] = start
-        metadata_dict["DATABAR_END"] = end
-    else:
-        metadata_dict["DATABAR_SIZE"] = 0
+    # FIXME Locate Databar Sigma
 
     # Get height, width, number of channels, number of frames, bit depth
     # and linear LUT flag from TIF tags
@@ -526,19 +450,19 @@ def get_metadata(filename, keys):
         image_width_um = Decimal(width) * psx
         metadata_dict["HFW"] = image_width_um
 
-    # Compute Vertical Field of View / Image Height
-    psy = metadata_dict.get("PIXEL_SIZE_Y_NM")
-    image_height_str = metadata_dict.get("VFW")
-    # image_height_str includes the databar size
-    if psy and metadata_dict["DATABAR_END"] == height - 1:
-        height = height - metadata_dict["DATABAR_SIZE"]  # Exclude databar
-        psy = " ".join(psy.split())
-        psy, unit = psy.split(" ")
-        psy = convert_value(psy, unit, "um")
-        image_height_um = Decimal(height) * psy
-        metadata_dict["VFW"] = image_height_um
+        # # Compute Vertical Field of View / Image Height
+        # psy = metadata_dict.get("PIXEL_SIZE_Y_NM")
+        # image_height_str = metadata_dict.get("VFW")
+        # # image_height_str includes the databar size
+        # if psy and metadata_dict["DATABAR_END"] == height - 1:
+        #     height = height - metadata_dict["DATABAR_SIZE"]  # Exclude databar
+        #     psy = " ".join(psy.split())
+        #     psy, unit = psy.split(" ")
+        #     psy = convert_value(psy, unit, "um")
+        #     image_height_um = Decimal(height) * psy
+        #     metadata_dict["VFW"] = image_height_um
 
-    # ####################### Convert Numerical Values #######################
+        # ####################### Convert Numerical Values #######################
 
     pressure_conversion_to_pascal = {
         "Pa": Decimal(1),
