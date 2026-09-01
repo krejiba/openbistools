@@ -7,126 +7,7 @@ import warnings
 
 from Hello import find_relevant_locations
 
-ATOMIC_SYMBOLS = [
-    "H",
-    "He",
-    "Li",
-    "Be",
-    "B",
-    "C",
-    "N",
-    "O",
-    "F",
-    "Ne",
-    "Na",
-    "Mg",
-    "Al",
-    "Si",
-    "P",
-    "S",
-    "Cl",
-    "Ar",
-    "K",
-    "Ca",
-    "Sc",
-    "Ti",
-    "V",
-    "Cr",
-    "Mn",
-    "Fe",
-    "Co",
-    "Ni",
-    "Cu",
-    "Zn",
-    "Ga",
-    "Ge",
-    "As",
-    "Se",
-    "Br",
-    "Kr",
-    "Rb",
-    "Sr",
-    "Y",
-    "Zr",
-    "Nb",
-    "Mo",
-    "Tc",
-    "Ru",
-    "Rh",
-    "Pd",
-    "Ag",
-    "Cd",
-    "In",
-    "Sn",
-    "Sb",
-    "Te",
-    "I",
-    "Xe",
-    "Cs",
-    "Ba",
-    "La",
-    "Ce",
-    "Pr",
-    "Nd",
-    "Pm",
-    "Sm",
-    "Eu",
-    "Gd",
-    "Tb",
-    "Dy",
-    "Ho",
-    "Er",
-    "Tm",
-    "Yb",
-    "Lu",
-    "Hf",
-    "Ta",
-    "W",
-    "Re",
-    "Os",
-    "Ir",
-    "Pt",
-    "Au",
-    "Hg",
-    "Tl",
-    "Pb",
-    "Bi",
-    "Po",
-    "At",
-    "Rn",
-    "Fr",
-    "Ra",
-    "Ac",
-    "Th",
-    "Pa",
-    "U",
-    "Np",
-    "Pu",
-    "Am",
-    "Cm",
-    "Bk",
-    "Cf",
-    "Es",
-    "Fm",
-    "Md",
-    "No",
-    "Lr",
-    "Rf",
-    "Db",
-    "Sg",
-    "Bh",
-    "Hs",
-    "Mt",
-    "Ds",
-    "Rg",
-    "Cn",
-    "Nh",
-    "Fl",
-    "Mc",
-    "Lv",
-    "Ts",
-    "Og",
-]
+# Validation
 COMPULSORY_COLUMNS = [
     "Name",
     "Location",
@@ -135,13 +16,37 @@ COMPULSORY_COLUMNS = [
     "Element 1",
     "% Element 1",
 ]
-ALLOWED_LOCATIONS = "RWTH,RUB,MPIE,FZJ,LEM3,EMPA,BAM,HZG,GFZ,TUDA,TUD"
-TERMS_CRYSTAL_TYPE = {
-    "MONOCRYSTALLINE",
-    "BICRYSTALLINE",
-    "OLIGOCRYSTALLINE",
-    "POLYCRYSTALLINE",
-}
+ALLOWED_LOCATIONS = ""
+TERMS_CRYSTAL_TYPE = set()
+ATOMIC_SYMBOLS, SUBSTRATES = [], []
+if st.session_state.logged_in:
+    ALLOWED_LOCATIONS = (
+        "RWTH,RUB,MPIE,FJZ,LEM3,EMPA,BAM,HZG,GFZ,TUDA,TUD,UDE,LEUPHANA,TUM"
+    )
+    TERMS_CRYSTAL_TYPE = set(
+        st.session_state.oBis.get_terms(vocabulary="CRYSTAL_TYPE").df.code.tolist()
+    )
+    SUBSTRATES = set(
+        st.session_state.oBis.get_terms(
+            vocabulary="THIN_FILM_SUBSTRATE_VOCAB"
+        ).df.code.tolist()
+    )
+    validation_plugin_code = st.session_state.oBis.get_object_type(
+        "SAMPLE"
+    ).validationPlugin
+    validation_plugin = st.session_state.oBis.get_plugin(validation_plugin_code)
+    # st.write(validation_plugin.script)
+    code_str = validation_plugin.script
+    import re, ast
+    from ase.data import chemical_symbols
+
+    match = re.search(r"ATOMIC_SYMBOLS\s*=\s*(\[[^\]]*\])", code_str, re.DOTALL)
+    try:
+        ATOMIC_SYMBOLS = (
+            ast.literal_eval(match.group(1)) if match else chemical_symbols[1:]
+        )
+    except Exception:
+        ATOMIC_SYMBOLS = chemical_symbols[1:]
 
 
 def perform_validation(df: pd.DataFrame) -> bool:
@@ -209,14 +114,16 @@ def perform_validation(df: pd.DataFrame) -> bool:
         msg = "**Date** should be **YYYY-MM-DD**\n"
         st.error(msg)
         return False
-    not_null_values = set(df["Crystal Type"].dropna().unique())
-    if not df["Crystal Type"].isna().all() and not not_null_values.issubset(
-        TERMS_CRYSTAL_TYPE
-    ):
-        msg = "**Crystal Type** should be one of the following:  \n"
-        msg += ", ".join(TERMS_CRYSTAL_TYPE)
-        st.error(msg)
-        return False
+    for vocab, terms in [
+        ("Crystal Type", TERMS_CRYSTAL_TYPE),
+        ("Substrate", SUBSTRATES),
+    ]:
+        not_null_values = set(df[vocab].dropna().unique())
+        if not df[vocab].isna().all() and not not_null_values.issubset(terms):
+            msg = f"**{vocab}** should be one of the following:  \n"
+            msg += ", ".join(terms)
+            st.error(msg)
+            return False
     object_permids = []
     for col_name in ["Parents", "Children"]:
         col = df[col_name].fillna("").str.strip().str.replace(r"\s+", " ", regex=True)
@@ -365,7 +272,7 @@ spreadsheet = st.file_uploader(
 st.session_state.table_loaded = False
 if spreadsheet:
 
-    df = pd.read_excel(spreadsheet, engine="odf")
+    df = pd.read_excel(spreadsheet, engine="odf", dtype={"Substrate Orientation": str})
 
     if perform_validation(df):
         for col_name in ["Parents", "Children"]:
@@ -374,7 +281,10 @@ if spreadsheet:
             df[col_name] = df[col_name].str.replace(r"\s+", " ", regex=True)
             df[col_name] = df[col_name].str.replace(", ", ",")
             df[col_name] = df[col_name].str.split(",")
-        for col_name in [col for col in df.columns if "% Element" in col]:
+        float_columns = [col for col in df.columns if "% Element" in col] + [
+            "Weight (g)"
+        ]
+        for col_name in float_columns:
             df[col_name] = pd.to_numeric(
                 df[col_name].apply(
                     lambda x: (str(x).replace(",", ".").replace("nan", ""))

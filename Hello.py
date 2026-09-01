@@ -25,7 +25,7 @@ import argparse
 import streamlit as st
 from streamlit import config as st_config
 import os
-import time
+from datetime import datetime
 from pybis import Openbis
 import pandas as pd
 from configparser import ConfigParser
@@ -65,6 +65,8 @@ ALLOWED_OBJECT_TYPES = [
     "MICRO_MECH_EXP",
     "MECH_EXP",
     "MECH_TEST_PROTOCOL",
+    "HEAT_TREATMENT_PROTOCOL",
+    "CASTING_PROTOCOL",
     "CUTTING_PROTOCOL",
     "FIB_MILLING_PROTOCOL",
     "ELECTROCHEM_PROTOCOL",
@@ -72,17 +74,25 @@ ALLOWED_OBJECT_TYPES = [
     "CALPHAD_DATABASE",
     "PHASE_DIAGRAM",
     "SAMPLE",  # Only structure files
+    "PUBLICATION",
+    "SOFTWARE",
 ]
 
-warnings.filterwarnings(action="ignore", category=FutureWarning)
+SUBTYPES = {
+    "EXPERIMENTAL_STEP": "EXP_TYPE",
+    "SIMULATION_EXP": "SIMULATION_TYPE",
+    "MICRO_MECH_EXP": "TEST_TYPE",
+    "MECH_EXP": "DEFORMATION_MODE",
+}
 
+warnings.filterwarnings(action="ignore", category=FutureWarning)
 
 ## ============================================================================
 ## Helper functions
 ## ============================================================================
 
 
-def init_session_state(temp_dir: str):
+def init_session_state(temp_dir: str, spaces: list, desktop: bool):
     # Initialize Streamlit Session State
 
     SESSION_DEFAULTS = {
@@ -111,6 +121,9 @@ def init_session_state(temp_dir: str):
         "options": None,
         "bucket_fill_levels": {},
         "demo_mode": False,
+        "spaces": spaces,
+        "desktop": desktop,
+        "files": None,
     }
 
     for k, v in SESSION_DEFAULTS.items():
@@ -170,23 +183,18 @@ def find_relevant_locations(username, include_samples=True):
 
     # Add spaces corresponding to research projects (+ user's personal space)
 
-    space_list = [
-        username.upper(),
-        "CRC1394",
-        "TRR188",
-        "CRC761",
-        "CSC",
-        "IMM_SPACE",
-        "IMM_NANOMECHANICS",
-    ]
+    space_list = st.session_state.spaces + [username.upper()]
+
     # Add spaces in inventory (DEPRECATED)
 
-    # space_list += [
-    #     "EXPERIMENTS",
-    #     "SAMPLES",
-    #     "METHODS",
-    #     "SIMULATION",
-    # ]
+    space_list += [
+        "PUBLICATIONS",
+        "EQUIPMENT",
+        # "EXPERIMENTS",
+        # "SAMPLES",
+        # "METHODS",
+        # "SIMULATION",
+    ]
 
     # We restrict which objects the user can upload to using this tool
 
@@ -204,6 +212,7 @@ def find_relevant_locations(username, include_samples=True):
     sep = "//"
 
     st.session_state.experiments = {}
+    st.session_state.experiments_with_data = {}
 
     experiments = st.session_state.oBis.get_experiments(
         attrs=["code", "project.code"], props=["$NAME", "NUM_DATASETS"]
@@ -232,8 +241,12 @@ def find_relevant_locations(username, include_samples=True):
         st.session_state.experiments[list_item] = identifier
         if exp["NUM_DATASETS"]:
             try:
-                int(exp["NUM_DATASETS"])
-                st.session_state.experiments_with_data[list_item] = identifier
+                if int(exp["NUM_DATASETS"]) > 0:
+                    st.session_state.experiments_with_data[list_item] = (
+                        identifier,
+                        None,
+                        None,
+                    )
             except ValueError:
                 # dynamic property pending evaluation - str
                 pass
@@ -241,20 +254,26 @@ def find_relevant_locations(username, include_samples=True):
         exp_objects = st.session_state.oBis.get_objects(
             experiment=identifier,
             attrs=["code"],
-            props=["$NAME", "NUM_DATASETS"],
+            props=["$NAME", "NUM_DATASETS"] + list(SUBTYPES.values()),
         ).df
         exp_objects = exp_objects[
-            exp_objects.type.isin(allowed_object_types)
+            (exp_objects.type.isin(allowed_object_types))
+            | (exp_objects.type.str.startswith("PYIRON"))
         ].reset_index()
         for j, exp_obj in exp_objects.iterrows():
             exp_dict = exp.to_dict()
             obj_dict = exp_obj.to_dict()
+            obj_type = obj_dict["type"]
             identifier, list_item = get_full_identifier(exp_dict, obj_dict, sep, True)
             st.session_state.experiments[list_item] = identifier
             if exp_obj["NUM_DATASETS"]:
                 try:
-                    int(exp_obj["NUM_DATASETS"])
-                    st.session_state.experiments_with_data[list_item] = identifier
+                    if int(exp_obj["NUM_DATASETS"]) > 0:
+                        st.session_state.experiments_with_data[list_item] = (
+                            identifier,
+                            obj_type,
+                            obj_dict.get(SUBTYPES.get(obj_type)),
+                        )
                 except ValueError:
                     # dynamic property pending evaluation - str
                     pass
@@ -262,7 +281,6 @@ def find_relevant_locations(username, include_samples=True):
     progress_bar.empty()
 
     exp_list = sorted(st.session_state.experiments.keys())
-    exp_list = list(exp_list)
     st.session_state.experiment_name_list = exp_list
 
     # Get all dataset types
@@ -278,53 +296,49 @@ def find_relevant_locations(username, include_samples=True):
 def configure_download_from_coscine():
     """Creates clients to read data from Coscine."""
 
-    # Configuration files are stored in an experiment in OpenBIS.
+    # CSV containing information about S3 buckets is stored in an experiment.
 
     CFG_EXP_LIST = [
-        "/CRC1394/CRC1394_COSCINE/CRC1394_COSCINE_CONFIG",
-        "/TRR188/TRR188_COSCINE/TRR188_COSCINE_CONFIG",
-        "/IMM_SPACE/IMM_COSCINE/FUNBLOCKS_COSCINE_CONFIG",
-        "/IMM_SPACE/IMM_COSCINE/SILA_COSCINE_CONFIG",
         "/PUBLICATIONS/PUBLIC_REPOSITORIES/PUBLICATIONS_COLLECTION",
+    ]
+
+    # S3 Configuration files are stored in dummy experiments in OpenBIS.
+
+    experiments = st.session_state.oBis.get_experiments().df.identifier.to_list()
+    CFG_EXP_LIST = CFG_EXP_LIST + [
+        exp for exp in experiments if exp.endswith("COSCINE_CONFIG")
     ]
 
     st.session_state.s3_download_ok = False
 
-    experiments = st.session_state.oBis.get_experiments().df.identifier.to_list()
-
     for config_expertiment in CFG_EXP_LIST:
-        if config_expertiment in experiments:
-            st.session_state.s3_download_ok = True
-            datasets = st.session_state.oBis.get_datasets(
-                experiment=config_expertiment,
-            )
-            for ds in datasets:
-                fname = ds.file_list[0].split("/")[-1]
-                if fname.endswith((".cfg", ".csv")):
-                    ds.download(
-                        destination=st.session_state.temp_dir,
-                        create_default_folders=False,
+        st.session_state.s3_download_ok = True
+        datasets = st.session_state.oBis.get_datasets(
+            experiment=config_expertiment,
+        )
+        for ds in datasets:
+            fname = ds.file_list[0].split("/")[-1]
+            if fname.endswith((".cfg", ".csv")):
+                ds.download(
+                    destination=st.session_state.temp_dir,
+                    create_default_folders=False,
+                )
+                local_path = st.session_state.temp_dir + "/" + fname
+                if fname.endswith(".cfg"):
+                    s3_client, bucket_name, dms_code = get_s3client(local_path, True)
+                    st.session_state.s3_clients[dms_code] = s3_client
+                    st.session_state.s3_bucket_names[dms_code] = bucket_name
+                elif fname.endswith(".csv"):
+                    levels_df = pd.read_csv(local_path)
+                    levels_df["name"] = levels_df["name"] + levels_df["used_gb"].apply(
+                        lambda x: f" ({x:} Gb)"
                     )
-                    local_path = st.session_state.temp_dir + "/" + fname
-                    if fname.endswith(".cfg"):
-                        s3_client, bucket_name, dms_code = get_s3client(
-                            local_path, True
-                        )
-                        st.session_state.s3_clients[dms_code] = s3_client
-                        st.session_state.s3_bucket_names[dms_code] = bucket_name
-                    elif fname.endswith(".csv"):
-                        levels_df = pd.read_csv(local_path)
-                        levels_df["name"] = levels_df["name"] + levels_df[
-                            "used_gb"
-                        ].apply(lambda x: f" ({x:} Gb)")
-                        levels_df.set_index("name", inplace=True)
-                        st.session_state.bucket_fill_levels = levels_df[
-                            "used_percent"
-                        ].to_dict()
-                    else:
-                        raise NotImplementedError(
-                            f"Unexpected file {ds.permId}: {fname}"
-                        )
+                    levels_df.set_index("name", inplace=True)
+                    st.session_state.bucket_fill_levels = levels_df[
+                        "used_percent"
+                    ].to_dict()
+                else:
+                    raise NotImplementedError(f"Unexpected file {ds.permId}: {fname}")
 
 
 def check_openbis_login_success():
@@ -507,10 +521,32 @@ def main():
         action="store_true",
         help="Switch to demo mode where s3 bucket is configured from secrets",
     )
+    parser.add_argument(
+        "--spaces",
+        nargs="+",
+        help="Codes of shared spaces the users can upload data into.",
+        default=[
+            "CRC1394",
+            "TRR188",
+            "CRC761",
+            "CSC",
+            "IMM_SPACE",
+            "IMM_NANOMECHANICS",
+            "SPP2476",
+        ],
+    )
+    parser.add_argument(
+        "--desktop",
+        type=int,
+        required=False,
+        help="Flag for desktop app",
+        choices=[0, 1],
+        default=0,
+    )
 
     args = parser.parse_args()
 
-    init_session_state(temp_dir=args.temp_dir)
+    init_session_state(temp_dir=args.temp_dir, spaces=args.spaces, desktop=args.desktop)
 
     # Workaround for demo
 
@@ -560,6 +596,15 @@ def main():
         or Coscine and link the data (and metadata, where applicable)
         to the description of an experiment in openBIS.
         """
+    )
+    st.info(
+        """
+    If this application substantially supports your research or is extended for new applications, please consider citing the associated publication:  
+    Rejiba, K., Lee, S.-H., Gasper, C., Freund, M. S. D., Korte-Kerzel, S., & Kerzel, U. B. (2026).  
+    *Towards Defect Phase Diagrams: From Research Data Management to Automated Workflows.*  
+    **Advanced Engineering Materials.**  
+    https://doi.org/10.1002/adem.202502882
+    """
     )
 
     st.subheader("Log into openBIS and configure access to Coscine")
@@ -677,19 +722,21 @@ def main():
                     bucket = st.session_state.s3_bucket_names[dmscode]
 
                 placeholder1.empty()
-                placeholder2.empty()
 
                 st.session_state.s3_client = client
                 st.session_state.s3_bucket_name = bucket
                 st.session_state.obis_dmscode = dmscode
 
                 # Sanity checks on the upload client
-                error_msg = check_read_s3()
-                warning_msg = check_write_s3()
+                with st.spinner("Checking S3 ..."):
+                    error_msg = check_read_s3()
+                    warning_msg = check_write_s3()
                 if error_msg is not None:
                     st.session_state.setup_done = False
                 else:
                     st.session_state.setup_done = True
+
+                placeholder2.empty()
 
     if st.session_state.setup_done:
         placeholder1.empty()
@@ -727,6 +774,29 @@ def main():
     else:
         if error_msg:
             st.error(f"Please provide a valid s3 config file: {error_msg}")
+
+    # Generate Personal Access Token for scripts / uploading large files
+    if st.session_state.setup_done:
+        usr = st.session_state.oBis._get_username()
+        user = st.session_state.oBis.get_user(usr, only_data=True)
+        firstname = user["firstName"].upper().replace("-", "")
+        lastname = user["lastName"].upper().replace("-", "")
+        if st.button("Create Personal Access Token"):
+            try:
+                pat = st.session_state.oBis.get_or_create_personal_access_token(
+                    sessionName=f"{firstname + lastname}_{datetime.now().isoformat()[:7]}",
+                )
+                st.markdown(
+                    f"""
+                **Your Personal Access Token:**  
+                `{pat.permId}`
+
+                **Valid until:**  
+                {pat.validToDate}
+                """
+                )
+            except Exception as e:
+                st.warning(e)
 
 
 if __name__ == "__main__":

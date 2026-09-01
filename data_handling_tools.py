@@ -25,9 +25,11 @@ import logging
 
 # Scripts to extract metadata from files to be linked
 from metadata.metadata_TescanClara import get_metadata as parse_tescan_clara
+from metadata.metadata_TescanClaraSharkSEM import get_metadata as parse_tescan_shark
 from metadata.metadata_FEIHelios import get_metadata as parse_fei_helios
 from metadata.metadata_ZeissLeo import get_metadata as parse_zeiss_leo
 from metadata.metadata_ZeissSigma import get_metadata as parse_zeiss_sigma
+from metadata.metadata_ZeissMerlin import get_metadata as parse_zeiss_merlin
 from metadata.metadata_ZeissGemini import get_metadata as parse_zeiss_gemini
 from metadata.metadata_ZeissSupra import get_metadata as parse_zeiss_supra
 from metadata.metadata_EdaxTeam_zip import get_metadata_generic as parse_edax_team_zip
@@ -84,6 +86,8 @@ def get_metadata(
         match metadata_parser:
             case "IMM_TescanClara" | "IMM Tescan Clara":
                 metadata_dict = parse_tescan_clara(file_name_fqdn, keys)
+            case "IMM_TescanClaraSharkSEM" | "IMM Tescan Clara SharkSEM":
+                metadata_dict = parse_tescan_shark(file_name_fqdn, keys)
             case (
                 "IMM_FEIHelios"
                 | "IMM FEI Helios"
@@ -100,6 +104,8 @@ def get_metadata(
                 metadata_dict = parse_zeiss_supra(file_name_fqdn, keys)
             case "MPIE_ZeissSigma" | "MPIE Zeiss Sigma":
                 metadata_dict = parse_zeiss_sigma(file_name_fqdn, keys)
+            case "MPIE_ZeissMerlin" | "MPIE Zeiss Merlin":
+                metadata_dict = parse_zeiss_merlin(file_name_fqdn, keys)
     elif data_set_type == "TEM_DATA":
         keys = keys_TEMDict
         match metadata_parser:

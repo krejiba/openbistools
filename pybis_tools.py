@@ -570,7 +570,7 @@ def get_full_identifier(
         [space_code, project_code, experiment_or_collection_name, object_name]
     )
     if include_permid_suffix:
-        display_name += f" ({object_permid})"
+        display_name += f" ({object_permid}, {object_identifier})"
 
     return full_identifier, display_name
 

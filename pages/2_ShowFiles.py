@@ -1,13 +1,13 @@
 import streamlit as st
 import os
 import time
-from datetime import datetime
+from datetime import datetime, date
 import pandas as pd
 from zipfile import ZIP_DEFLATED, ZipFile
 import requests
 from io import BytesIO
 import base64
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 import numpy as np
 import warnings
 import re
@@ -17,12 +17,17 @@ from s3_tools import s3_file_exists, s3_file_upload
 from pybis_tools import get_info_from_identifier
 
 # Utility to update experiment list
-from Hello import find_relevant_locations
+from Hello import find_relevant_locations, SUBTYPES
 
 # Utilities for preview
 from visualization.tem import get_image_stack as get_tem_stack
+from visualization.nrr import get_image as get_tem_image
 from visualization.video_rendering import VideoRenderer
-from visualization.presentation import create_grid_from_ppt, create_grid_from_doc
+from visualization.presentation import (
+    create_grid_from_ppt,
+    create_grid_from_doc,
+    create_grid_from_pdf,
+)
 
 
 warnings.filterwarnings(action="ignore", category=FutureWarning)
@@ -35,23 +40,36 @@ warnings.filterwarnings(action="ignore", category=FutureWarning)
 def dataframe_with_selections(df):
     df_with_selections = df.copy()
     df_with_selections.insert(0, "Select", False)
+    pt_df = st.session_state.oBis.get_property_types().df
+    datatype_mapping = {}
+    for col in df_with_selections.columns[12:]:
+        if len(pt_df[pt_df.label == col]) == 1:
+            datatype_mapping[col] = pt_df[pt_df.label == col]["dataType"].item()
+
+    column_config = {
+        "ELN": st.column_config.LinkColumn(display_text="Go"),
+        "Select": st.column_config.CheckboxColumn(required=True),
+        "Preview": st.column_config.ImageColumn(width="small"),
+        "S3 Path": st.column_config.TextColumn(width="small"),
+        "Registration Date": st.column_config.DatetimeColumn(
+            format="YYYY-MM-DD HH:mm:ss"
+        ),
+        "Kind": None,
+        "Size (Mb)": st.column_config.NumberColumn(),
+    }
+    column_config.update(
+        {
+            col: st.column_config.NumberColumn()
+            for col, dtype in datatype_mapping.items()
+            if dtype in ["INTEGER", "REAL"]
+        }
+    )
 
     # Get dataframe row-selections from user with st.data_editor
-
     edited_df = st.data_editor(
         df_with_selections,
         hide_index=True,
-        column_config={
-            "ELN": st.column_config.LinkColumn(display_text="Go"),
-            "Select": st.column_config.CheckboxColumn(required=True),
-            "Preview": st.column_config.ImageColumn(width="small"),
-            "S3 Path": st.column_config.TextColumn(width="small"),
-            "Registration Date": st.column_config.DatetimeColumn(
-                format="YYYY-MM-DD HH:mm:ss"
-            ),
-            "Kind": None,
-            "Size (Mb)": st.column_config.NumberColumn(),
-        },
+        column_config=column_config,
         disabled=df.columns,
     )
 
@@ -67,7 +85,7 @@ def generate_preview(pil_img: Image, img_height: int = 480, format: str = "JPEG"
         original_mode = pil_img.mode
         if original_mode in ["RGB", "P", "CMYK"]:
             output_mode = "RGB"
-        elif original_mode in ["L", "LA", "I;16", "I;16B", "I;16L", "I;16N"]:
+        elif original_mode in ["F", "L", "LA", "I;16", "I;16B", "I;16L", "I;16N"]:
             output_mode = "L"
         elif original_mode == "RGBA":
             background = Image.new("RGB", pil_img.size, (255, 255, 255))
@@ -98,9 +116,17 @@ def generate_preview(pil_img: Image, img_height: int = 480, format: str = "JPEG"
 
 
 def get_img_preview_from_path(path: str):
-    image = Image.open(path)
+    try:
+        image = Image.open(path)
+    except UnidentifiedImageError as e:
+        image = Image.new("L", (64, 64))
+        draw = ImageDraw.Draw(image)
+        draw.text((2, 25), "Corrupted", fill=255, font=ImageFont.load_default())
     if image.mode in ["I;16", "I;16B", "I;16L", "I;16N"]:
         image = image.point(lambda i: i * (255.0 / 65535.0))
+    if image.mode in ["F"]:
+        min_val, max_val = image.getextrema()
+        image = image.point(lambda i: (i - min_val) * 255.0 / (max_val - min_val))
     image = image.convert("RGB")
     desired_height = 1024
     height, width = image.size
@@ -154,7 +180,12 @@ preview_dict = {
     "EBSD_EXP_DATA": "ebsd_eds",
     "EBSD-EDS_DATA": "ebsd_eds",
     "EDS_DATA": "ebsd_eds",
+    "EBSD_SIM_MASTERPATTERN": "ebsd_eds",
+    "EBSD_SIM_SCRRENPATTERN": "ebsd_eds",
 }
+
+file_num_preview_limit = 500  # Total number of files
+file_size_preview_limit = 500  # Individual file size
 
 
 st.title("Show Linked Data in openBIS")
@@ -315,6 +346,78 @@ def create_slides(
         doc.save(output_path)
 
 
+# Filter entries before form
+filtered_keys = []
+if st.session_state.logged_in:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        projects = ["ALL"] + sorted(
+            {
+                key.split("//")[1]
+                for key in st.session_state.experiments_with_data.keys()
+                if len(key.split("//")) > 1
+            }
+        )
+        project = st.selectbox(
+            "Select project",
+            projects,
+            disabled=not st.session_state.logged_in,
+            index=0,
+        )
+    with col2:
+        object_types = ["ALL"] + sorted(
+            {
+                x[1]
+                for x in st.session_state.experiments_with_data.values()
+                if x[1] is not None
+            }
+        )
+        selected_obj_type = st.selectbox(
+            "Select experiment type",
+            object_types,
+            disabled=not st.session_state.logged_in,
+            index=0,
+            format_func=lambda code: (
+                st.session_state.oBis.get_object_type(code).description
+                if code != "ALL"
+                else "ALL"
+            ),
+        )
+    with col3:
+        vocab_terms = st.session_state.oBis.get_terms().df
+        vocab_terms = vocab_terms.set_index("code")["label"].to_dict()
+        for ot_code, pt_code in SUBTYPES.items():
+            if selected_obj_type == ot_code:
+                sub_types = ["ALL"] + sorted(
+                    {
+                        x[2]
+                        for x in st.session_state.experiments_with_data.values()
+                        if x[2] is not None and x[2] != "" and x[1] == ot_code
+                    }
+                )
+                selected_sub_type = st.selectbox(
+                    "Select subtype",
+                    sub_types,
+                    disabled=not st.session_state.logged_in,
+                    index=0,
+                    format_func=lambda code: vocab_terms.get(code, "ALL"),
+                )
+                break
+        else:
+            selected_sub_type = "ALL"
+    for key, value in st.session_state.experiments_with_data.items():
+        if len(value) == 3:
+            _, obj_type, sub_type = value
+            parts = key.split("//")
+            if (len(parts) > 1 and parts[1] == project) or (project == "ALL"):
+                if obj_type == selected_obj_type or selected_obj_type == "ALL":
+                    if obj_type in SUBTYPES and (
+                        sub_type == selected_sub_type or selected_sub_type == "ALL"
+                    ):
+                        filtered_keys.append(key)
+                    if obj_type not in SUBTYPES:
+                        filtered_keys.append(key)
+
 with st.form("Experiment"):
 
     refresh_btn = st.form_submit_button(
@@ -339,20 +442,87 @@ with st.form("Experiment"):
             "You can upload to a Default Experiment "
             f"or one of following: {allowed_object_types_display_str}"
         )
-    # Prompt users to choose an object or an experiment/collection
     st.selectbox(
         "Find the entry where your data is linked",
-        sorted(st.session_state.experiments_with_data.keys()),
+        sorted(filtered_keys),
         index=None,
         placeholder="Select ELN entry",
         key="experiment",
         disabled=not st.session_state.logged_in,
-        # help="Only experiments with data are displayed here",
+        help="Only experiments with data are displayed here",
     )
-    include_preview = st.toggle(
-        "Preview",
-        help="Only if you're not in a hurry, We post-process some of the images",
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        include_preview = st.toggle(
+            "Preview",
+            help="Only if you're not in a hurry, We post-process some of the images",
+            disabled=not st.session_state.setup_done,
+        )
+    with col2:
+        default_start = date(2024, 1, 1)
+        default_end = date(2027, 12, 31)
+        date_limits = st.date_input(
+            "Limit dates (for preview)",
+            value=(date(2024, 1, 1), date(2027, 12, 31)),
+            disabled=not st.session_state.setup_done,
+            help=f"Filter by registrationDate, only when number of files > {file_num_preview_limit}",
+        )
+        if date_limits is None or len(date_limits) != 2 or None in date_limits:
+            start_date, end_date = default_start, default_end
+        else:
+            start_date, end_date = date_limits
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+    with col3:
+        extensions = [
+            "docx",
+            "pptx",
+            "pdf",
+            "tif",
+            "jpg",
+            "png",
+            "bmp",
+            "dm4",
+            "dm3",
+            "emd",
+            "h5",
+            "zip",
+            "ang",
+            "osc",
+            "edaxh5",
+            "oh5",
+            "up1",
+            "up2",
+            "h5oina",
+            "sdf5",
+            "nmd",
+            "poscar",
+            "contcar",
+            "vasp",
+            "data",
+            "lmp",
+            "out",
+            "nc",
+            "mp4",
+            "avi",
+        ]
+        extensions = sorted(extensions)
+        selected_extensions = st.multiselect(
+            "Limit Extensions (for preview)",
+            options=extensions,
+            disabled=not st.session_state.setup_done,
+            help="Only the selected extensions will be fetched. If empty, all extensions will be fetched",
+        )
+        if not selected_extensions:
+            selected_extensions = extensions
+
+    img_extensions = {ext.lstrip(".") for ext in Image.registered_extensions().keys()}
+    ignore_non_image = st.toggle(
+        label="Ignore non-image data when creating slides",
         disabled=not st.session_state.setup_done,
+        help=f"Only image files are used. Supported extensions: *{', '.join(img_extensions)}*",
     )
 
     choose_exp_btn = st.form_submit_button(
@@ -366,6 +536,7 @@ with st.form("Experiment"):
         entry = st.session_state.experiment
         identifier = st.session_state.experiments[entry]
         permid = entry.rsplit("(", 1)[1].split(")")[0]
+        permid = permid.split(", ")[0]
         if identifier.count("/") == 3:
             url = create_experiment_href(st.session_state.oBis, identifier)
             num_datasets = (
@@ -384,66 +555,83 @@ with st.form("Experiment"):
 
         st.session_state.selection_deletion = pd.DataFrame()
 
-        with st.spinner(text="Preparing files ..."):
-            identifier = st.session_state.experiments[st.session_state.experiment]
-            exp_name, object_name = get_info_from_identifier(identifier)
+        identifier = st.session_state.experiments[st.session_state.experiment]
+        exp_name, object_name = get_info_from_identifier(identifier)
 
-            datasets = st.session_state.oBis.get_datasets(
-                experiment=exp_name,
-                sample=object_name,
-            )
+        datasets = st.session_state.oBis.get_datasets(
+            experiment=exp_name,
+            sample=object_name,
+        )
 
-            format_func = lambda code: st.session_state.oBis.get_property_type(
+        format_func = lambda code: st.session_state.oBis.get_property_type(code).label
+
+        md_keys = set()
+
+        for ds in datasets:
+            md_keys.update(ds.p.all().keys())
+        if "$name" in md_keys:
+            md_keys.remove("$name")  # Already in dataframe
+        md_keys = sorted(md_keys, key=format_func)
+
+        options = st.multiselect(
+            label="Choose metadata fields to display "
+            "(re-click on Confirm to update table)",
+            options=md_keys,
+            key="metadata_options",
+            format_func=lambda code: st.session_state.oBis.get_property_type(
                 code
-            ).label
+            ).label,
+        )
 
-            md_keys = set()
+        cols = [
+            "ELN",
+            "Preview",
+            "Name",
+            "Type",
+            "Kind",
+            "Registration Date",
+            "permID",
+            "Filename",
+            "Extension",
+            "S3 Path",
+            "Size (Mb)",
+        ]
 
-            for ds in datasets:
-                md_keys.update(ds.p.all().keys())
-            if "$name" in md_keys:
-                md_keys.remove("$name")  # Already in dataframe
-            md_keys = sorted(md_keys, key=format_func)
+        cols_all = cols + [
+            st.session_state.oBis.get_property_type(key).label for key in md_keys
+        ]
 
-            options = st.multiselect(
-                label="Choose metadata fields to display "
-                "(re-click on Confirm to update table)",
-                options=md_keys,
-                key="metadata_options",
-                format_func=lambda code: st.session_state.oBis.get_property_type(
-                    code
-                ).label,
-            )
+        for opt in options:
+            opt = st.session_state.oBis.get_property_type(opt).label
+            cols.append(opt)
 
-            cols = [
-                "ELN",
-                "Preview",
-                "Name",
-                "Type",
-                "Kind",
-                "Registration Date",
-                "permID",
-                "Filename",
-                "Extension",
-                "S3 Path",
-                "Size (Mb)",
-            ]
+        if datasets is not None and include_preview:
+            permids_filtered = datasets.df.permId.to_list()
+            n_files = len(datasets.df)
+            if n_files > file_num_preview_limit:
+                if date_limits and len(date_limits) == 2:
+                    start_date, end_date = date_limits
+                    registration_date = pd.to_datetime(datasets.df["registrationDate"])
+                    mask = (registration_date >= pd.to_datetime(start_date)) & (
+                        registration_date <= pd.to_datetime(end_date)
+                    )
+                    permids_filtered = datasets.df[mask].permId.to_list()
+                    if len(permids_filtered) > file_num_preview_limit:
+                        st.warning(
+                            f"Skipping preview, too many files ({n_files} > {file_num_preview_limit})"
+                        )
+                        include_preview = False
+                    else:
+                        include_preview = True
+        else:
+            permids_filtered = []
+        token = st.session_state.oBis.token
 
-            cols_all = cols + [
-                st.session_state.oBis.get_property_type(key).label for key in md_keys
-            ]
+        spinner_text = f"Preparing {len(datasets)} files"
+        if include_preview:
+            spinner_text += f" (preview for {len(permids_filtered)})"
 
-            for opt in options:
-                opt = st.session_state.oBis.get_property_type(opt).label
-                cols.append(opt)
-
-            if datasets is not None and include_preview:
-                n_files = len(datasets.df)
-                if n_files > 500:
-                    st.warning(f"Skipping preview, too many files ({n_files})")
-                    include_preview = False
-
-            token = st.session_state.oBis.token
+        with st.spinner(text=spinner_text):
 
             data = []
             data_all = []
@@ -477,7 +665,22 @@ with st.form("Experiment"):
                 preview = ""
                 fetched_preview = False
 
-                if include_preview:
+                ext_map = {"jpeg": "jpg", "tiff": "tif"}
+                mapped_extension = ext_map.get(extension, extension)
+
+                if (
+                    include_preview
+                    and permID in permids_filtered
+                    and (
+                        (len(selected_extensions) > 0)
+                        and (
+                            mapped_extension in selected_extensions
+                            or any(
+                                ext in mapped_extension for ext in selected_extensions
+                            )
+                        )
+                    )
+                ):
                     if (
                         dataset_type in preview_dict
                         and "S3_OPENBIS_CACHE" in st.session_state.s3_clients
@@ -504,9 +707,9 @@ with st.form("Experiment"):
                         preview = generate_preview(img, format=preview_format)
 
                     if not fetched_preview:
-                        if size_mb > 500:
+                        if size_mb > file_size_preview_limit:
                             st.toast(
-                                f"{filename} is larger that 500 Mb ({size_mb:.2f} Mb)"
+                                f"{filename} is larger that {file_size_preview_limit} Mb ({size_mb:.2f} Mb)"
                             )
                         else:
                             if download_url is not None:
@@ -530,6 +733,7 @@ with st.form("Experiment"):
                                         "bmp",
                                     ]:
                                         img = Image.open(data_bytes)
+
                                     else:
                                         with open(local_filename, "wb") as fh:
                                             fh.write(data_bytes.read())
@@ -558,6 +762,8 @@ with st.form("Experiment"):
                                             img = create_grid_from_ppt(local_filename)
                                         elif extension in ["docx"]:
                                             img = create_grid_from_doc(local_filename)
+                                        elif extension in ["pdf"]:
+                                            img = create_grid_from_pdf(local_filename)
                                         elif dataset_type == "TEM_DATA":
                                             if extension == "emd":
                                                 img_array = get_tem_stack(
@@ -566,6 +772,20 @@ with st.form("Experiment"):
                                             elif extension in ["dm3", "dm4"]:
                                                 img_array = get_tem_stack(
                                                     local_filename, False
+                                                )
+                                            elif extension in ["ser"]:
+                                                img_array = get_tem_stack(
+                                                    local_filename, False
+                                                )
+                                            else:
+                                                img_array = np.array(
+                                                    Image.open("media/preview.jpg")
+                                                )
+                                            img = Image.fromarray(img_array)
+                                        elif dataset_type == "STEM_ALIGNED_DATA":
+                                            if extension == "nc":
+                                                img_array = get_tem_image(
+                                                    local_filename
                                                 )
                                             else:
                                                 img_array = np.array(
@@ -677,11 +897,18 @@ with placeholder.form("GetData"):
             if download_all_btn or slides_all_btn:
                 selection = st.session_state.df_files
             st.session_state.selection = selection
+            if ignore_non_image and slides_all_btn:
+                img_extensions = {
+                    ext.lstrip(".") for ext in Image.registered_extensions().keys()
+                }
+                selection = selection[selection.Extension.isin(img_extensions)]
             size_mb = selection["Size (Mb)"].sum()
+            size_gb = size_mb / 1024
+            max_size_gb = st.session_state.max_size // 1024
 
             if size_mb > st.session_state.max_size:
                 st.error(
-                    f"Too much data to download ({size_mb:.2f} Gb > {st.session_state.max_size})   \n \
+                    f"Too much data to download ({size_gb:.2f} Gb > {max_size_gb:d} Gb)   \n \
                         Please download files one by one"
                 )
             else:

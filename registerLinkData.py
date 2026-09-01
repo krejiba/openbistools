@@ -70,11 +70,13 @@ from data_handling_tools import get_metadata
 
 PARSERS = [
     "IMM_TescanClara",
+    "IMM_TescanClaraSharkSEM",
     "IMM_FEIHelios",
     "IMM_ZeissLeo",
     "GFE_ZeissGemini",
     "KKS_ZeissSupra",
     "MPIE_ZeissSigma",
+    "MPIE_ZeissMerlin",
     "VELOX_EMD",
     "GMS_DM",
     "EDAX_ZIP",

@@ -99,7 +99,7 @@ def add_metadata(metadata_dict: dict, mapping: dict, dataset: h5py.Dataset) -> N
             if openbis_datatype == "BOOLEAN":
                 if value in ["0", "n"]:
                     value = False
-                elif value == ["1", "y"]:
+                elif value in ["1", "y"]:
                     value = True
             if openbis_datatype == "REAL":
                 value = float(value)

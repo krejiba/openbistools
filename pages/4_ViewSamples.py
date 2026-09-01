@@ -4,6 +4,7 @@ from pybis import Openbis
 import warnings
 import networkx as nx
 import plotly.graph_objects as go
+import plotly.io as pio
 import json
 import datetime
 from pandas import DataFrame
@@ -890,57 +891,70 @@ with st.form("Choice"):
                 st.warning("Choose either a Sample or a Project")
             else:
                 with st.spinner("Creating graph from data ..."):
-                    finder = st.session_state.finder
-                    property_types = finder.property_types["property_types"]
+                    try:
+                        finder = st.session_state.finder
+                        property_types = finder.property_types["property_types"]
 
-                    if sample is not None:
-                        graph = finder.find_related_objects(
-                            permid=sample,
-                            skip_terminal=skip_terminal,
-                            stop_protocol=stop_protocol,
-                            skip_simulation=skip_simulation,
-                            collections=collections,
-                            elements=elements,
-                        )
-                        plotter = OpenbisHierarchicalGraphPlotter(
-                            graph, property_types=property_types
-                        )
-                        if len(graph) == 0:
-                            st.toast(
-                                "No samples were found with the requested criteria"
+                        if sample is not None:
+                            graph = finder.find_related_objects(
+                                permid=sample,
+                                skip_terminal=skip_terminal,
+                                stop_protocol=stop_protocol,
+                                skip_simulation=skip_simulation,
+                                collections=collections,
+                                elements=elements,
                             )
-                        st.session_state.figure = plotter.generate_figure()
-                    if project is not None:
-                        project_graph = nx.DiGraph()
-                        sample_permids = st.session_state.oBis.get_objects(
-                            type="SAMPLE", project=project
-                        ).df.permId
-                        for sample in sample_permids:
-                            if sample not in project_graph.nodes.keys():
-                                graph = finder.find_related_objects(
-                                    permid=sample,
-                                    skip_terminal=skip_terminal,
-                                    stop_protocol=stop_protocol,
-                                    skip_simulation=skip_simulation,
-                                    collections=collections,
-                                    elements=elements,
+                            plotter = OpenbisHierarchicalGraphPlotter(
+                                graph, property_types=property_types
+                            )
+                            if len(graph) == 0:
+                                st.toast(
+                                    "No samples were found with the requested criteria"
                                 )
-                                project_graph.update(graph)
-                        if len(project_graph) == 0:
-                            st.toast(
-                                "No samples were found with the requested criteria"
+                            st.session_state.figure = plotter.generate_figure()
+                        if project is not None:
+                            project_graph = nx.DiGraph()
+                            sample_permids = st.session_state.oBis.get_objects(
+                                type="SAMPLE", project=project
+                            ).df.permId
+                            for sample in sample_permids:
+                                if sample not in project_graph.nodes.keys():
+                                    graph = finder.find_related_objects(
+                                        permid=sample,
+                                        skip_terminal=skip_terminal,
+                                        stop_protocol=stop_protocol,
+                                        skip_simulation=skip_simulation,
+                                        collections=collections,
+                                        elements=elements,
+                                    )
+                                    project_graph.update(graph)
+                            if len(project_graph) == 0:
+                                st.toast(
+                                    "No samples were found with the requested criteria"
+                                )
+                            plotter = OpenbisHierarchicalGraphPlotter(
+                                project_graph, property_types=property_types
                             )
-                        plotter = OpenbisHierarchicalGraphPlotter(
-                            project_graph, property_types=property_types
+                            st.session_state.figure = plotter.generate_figure()
+                    except Exception:
+                        st.error(
+                            "Error while fetching data. Please try logging in again if the problem persists."
                         )
-                        st.session_state.figure = plotter.generate_figure()
+
 if st.session_state.figure is not None:
     event = st.plotly_chart(
         st.session_state.figure,
-        use_container_width=True,
+        width="stretch",
         key="hierarchical-graph",
         on_select="rerun",
         selection_mode="points",
+    )
+    html_string = pio.to_html(st.session_state.figure)
+    st.download_button(
+        label="Download Figure as HTML",
+        data=html_string,
+        file_name="figure.html",
+        mime="text/html",
     )
     if len(event.selection.points) and "text" in event.selection.points[0]:
         for e in event.selection.points[0]["text"].split("<br>"):

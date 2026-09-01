@@ -284,91 +284,8 @@ def get_tif_image_array(filename):
 #     return img
 
 
-def detect_databar(array_image, text_color=(0, 255, 0)) -> bool:
-    has_databar = False
-    height = len(array_image)
-    for i in range(height * 3 // 4, height):
-        if text_color in array_image[i]:
-            has_databar = True
-            break
-    return has_databar
-
-
-def detect_databar_start_end(
-    array_image, border_color=(0, 0, 0), text_color=(0, 255, 0), margin=10
-):
-    height = len(array_image)
-    width = len(array_image[0])
-    databar_start_end = []
-    for i in range(height * 3 // 4, height):
-        if array_image[i].count(border_color) >= width - margin:
-            databar_start_end.append(i)
-    if len(databar_start_end) == 2:
-        return (
-            databar_start_end[0],
-            databar_start_end[1],
-            databar_start_end[1] - databar_start_end[0] + 1,
-        )
-    else:
-        indices = [
-            i
-            for i in range(height * 3 // 4, height)
-            if text_color in array_image[i][margin // 2 : -margin // 2]
-        ]
-        if not indices:
-            return None, None, None
-        return min(indices), max(indices), max(indices) - min(indices) + 1
-
-
-def get_databar_metadata(
-    filename: str, border_color=(0, 0, 0), text_color=(0, 255, 0), margin=10
-):
-    """
-    Extract metadata about a the databar.
-
-    This function loads a TIFF image, detects whether a databar is present,
-    and if so, determines its start position, end position, and width.
-
-    Parameters
-    ----------
-    filename : str
-        Path to the TIFF image file.
-    border_color : tuple, optional
-        RGB color tuple used to identify the databar border (default is black: (0, 0, 0)).
-    text_color : tuple, optional
-        RGB color tuple used to identify the databar text (default is green: (0, 255, 0)).
-    margin : int, optional
-        Margin in pixels used during detection to avoid edge artifacts (default is 10).
-
-    Returns
-    -------
-    dict
-        A dictionary containing:
-        - "HAS_DATABAR" (bool): Whether a databar was detected.
-        - "DATABAR_START" (int or None): Starting position of the databar.
-        - "DATABAR_END" (int or None): Ending position of the databar.
-        - "DATABAR_SIZE" (int or None): Height of the databar.
-    """
-    array_image = get_tif_image_array(filename)
-    has_databar = detect_databar(array_image, text_color=text_color)
-    if has_databar:
-        start, end, width = detect_databar_start_end(
-            array_image, text_color=text_color, border_color=border_color, margin=margin
-        )
-    else:
-        start, end, width = None, None, None
-
-    md = {
-        "HAS_DATABAR": has_databar,
-        "DATABAR_START": start,
-        "DATABAR_END": end,
-        "DATABAR_SIZE": width,
-    }
-    return md
-
-
 def get_metadata(filename, keys):
-    """Extracts metadata from a *.tif recorded by the Zeiss Sigma microscope.
+    """Extracts metadata from a *.tif recorded by the Zeiss Merlin microscope.
 
     The metadata are at the beginning of the file, one key-value pair per line.
     We open the file in binary mode and extract all relevant keys.
@@ -381,10 +298,8 @@ def get_metadata(filename, keys):
 
     Assumption 3: Square pixels.
 
-    Assumption 4: The databar has green text and is located at the bottom.
-
     Args:
-        filename (str): Filename of the *.tif file recorded by a Zeiss Sigma.
+        filename (str): Filename of the *.tif file recorded by a Zeiss Merlin.
 
     Returns:
         dict: dictionary of extracted metadata
@@ -443,7 +358,7 @@ def get_metadata(filename, keys):
 
     # Static information not found in the TIF - Change if using another device
     metadata_dict["DEVICE_MANUFACTURER"] = "ZEISS"
-    metadata_dict["DEVICE_NAME"] = "Sigma 500"
+    metadata_dict["DEVICE_NAME"] = "Merlin"
     metadata_dict["INSTITUTION"] = "MPIE"
 
     # ############################ Parse Tif File ############################
@@ -464,7 +379,7 @@ def get_metadata(filename, keys):
         if "DP_VENT_INVALID_REASON".encode("ascii") in line:
             found_zeiss_sem_marker = True
     if not found_zeiss_sem_marker:
-        raise ValueError("Was the file created by a Zeiss (Sigma) microscope?")
+        raise ValueError("Was the file created by a Zeiss (Merlin) microscope?")
 
     for line in lines:
         for key in field_map.keys():
@@ -502,9 +417,7 @@ def get_metadata(filename, keys):
 
     # ############################# Infer Values #############################
 
-    # Locate Databar: text inside black border
-    databar_dict = get_databar_metadata(filename)
-    metadata_dict.update(databar_dict)
+    # FIXME Locate Databar Merlin
 
     # Get height, width, number of channels, number of frames, bit depth
     # and linear LUT flag from TIF tags

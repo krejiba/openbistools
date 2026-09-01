@@ -1,5 +1,6 @@
 from pptx import Presentation
 from docx import Document
+import pdfplumber
 from PIL import Image
 import io
 
@@ -38,6 +39,16 @@ def convert_ppt_to_images(ppt_file):
     return image_files
 
 
+def convert_pdf_to_images(pdf_file, resolution=150):
+    images = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            page_image = page.to_image(resolution=resolution)
+            pil_img = page_image.original.convert("RGB")
+            images.append(pil_img)
+    return images
+
+
 def create_image_grid(images, grid_size=(3, 3)):
     if not images:
         return
@@ -60,4 +71,9 @@ def create_grid_from_ppt(ppt_file, grid_size=(3, 3)):
 
 def create_grid_from_doc(doc_file, grid_size=(3, 3)):
     images = convert_doc_to_images(doc_file)
+    return create_image_grid(images, grid_size)
+
+
+def create_grid_from_pdf(pdf_file, grid_size=(3, 3), resolution=150):
+    images = convert_pdf_to_images(pdf_file, resolution=resolution)
     return create_image_grid(images, grid_size)

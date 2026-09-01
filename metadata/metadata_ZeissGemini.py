@@ -285,7 +285,7 @@ def get_tif_image_array(filename):
 
 
 def get_metadata(filename, keys):
-    """Extracts metadata from a *.tif recorded by the Zeiss Leo microscope.
+    """Extracts metadata from a *.tif recorded by the Zeiss Gemini microscope.
 
     The metadata are at the beginning of the file, one key-value pair per line.
     We open the file in binary mode and extract all relevant keys.
@@ -299,7 +299,7 @@ def get_metadata(filename, keys):
     Assumption 3: Square pixels.
 
     Args:
-        filename (str): Filename of the *.tif file recorded by a Zeiss Leo.
+        filename (str): Filename of the *.tif file recorded by a Zeiss Gemini.
 
     Returns:
         dict: dictionary of extracted metadata
@@ -374,12 +374,12 @@ def get_metadata(filename, keys):
         line = line.replace(b"\xb5", b"u")  # \xb5 (mu)
         lines.append(line)
 
-    found_zeiss_leo_marker = False
+    found_zeiss_sem_marker = False
     for line in lines:
         if "DP_VENT_INVALID_REASON".encode("ascii") in line:
-            found_zeiss_leo_marker = True
-    if not found_zeiss_leo_marker:
-        raise ValueError("Was the file created by a Zeiss (Leo) microscope?")
+            found_zeiss_sem_marker = True
+    if not found_zeiss_sem_marker:
+        raise ValueError("Was the file created by a Zeiss (Gemini) microscope?")
 
     for line in lines:
         for key in field_map.keys():
@@ -417,7 +417,7 @@ def get_metadata(filename, keys):
 
     # ############################# Infer Values #############################
 
-    # Locate Databar Leo - compatible with Jython
+    # Locate Databar Gemini - compatible with Jython
 
     # Define functions to bypass using numpy
     diff = lambda arr: [arr[i + 1] - arr[i] for i in range(len(arr) - 1)]

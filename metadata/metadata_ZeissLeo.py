@@ -351,6 +351,7 @@ def get_metadata(filename, keys):
         "Version": "SOFTWAREVERSION",
         "WD": "WD",
         "Width": "HFW",
+        # "Serial No.": "DEVICE_NAME"
     }
 
     metadata_dict = dict.fromkeys(keys)
@@ -376,11 +377,11 @@ def get_metadata(filename, keys):
         line = line.replace(b"\xb5", b"u")  # \xb5 (mu)
         lines.append(line)
 
-    found_zeiss_leo_marker = False
+    found_zeiss_sem_marker = False
     for line in lines:
         if "DP_VENT_INVALID_REASON".encode("ascii") in line:
-            found_zeiss_leo_marker = True
-    if not found_zeiss_leo_marker:
+            found_zeiss_sem_marker = True
+    if not found_zeiss_sem_marker:
         raise ValueError("Was the file created by a Zeiss (Leo) microscope?")
 
     for line in lines:
@@ -541,7 +542,7 @@ def get_metadata(filename, keys):
         metadata_dict["VFW"] = image_height_um
 
     # ######################## Convert Boolean Values ########################
-    
+
     tilt_correction_on = metadata_dict.get("TILT_CORRECTION_ON")
     if tilt_correction_on:
         tilt_correction_on = tilt_correction_on.lower() != "off"

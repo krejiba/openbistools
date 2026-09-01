@@ -55,6 +55,21 @@ def format_func(code: str) -> str:
             return " ".join(part.capitalize() for part in code.split("_"))
 
 
+def find_linked_samples(object_code):
+    """Returns a list of samples directly linked to the selected object."""
+
+    object = st.session_state.oBis.get_object(object_code)
+    samples = []
+    relative_identifier = None
+    for relative_identifier in object.children + object.parents:
+        relative = st.session_state.oBis.get_object(relative_identifier)
+        if relative.type not in ALLOWED_OBJECT_TYPES:
+            continue
+        if relative.type == "SAMPLE":
+            samples.append(relative)
+    return samples
+
+
 def display_linked_samples():
     """Presents information about linked samples"""
     full_identifier = st.session_state.experiments[st.session_state.experiment]
@@ -85,20 +100,6 @@ def display_linked_samples():
             msg += f"Please change the sample if that is not the desired outcome."
             st.markdown(msg)
             return
-
-    def find_linked_samples(object_code):
-        """Returns a list of samples directly linked to the selected object."""
-
-        object = st.session_state.oBis.get_object(object_code)
-        samples = []
-        relative_identifier = None
-        for relative_identifier in object.children + object.parents:
-            relative = st.session_state.oBis.get_object(relative_identifier)
-            if relative.type not in ALLOWED_OBJECT_TYPES:
-                continue
-            if relative.type == "SAMPLE":
-                samples.append(relative)
-        return samples
 
     with st.spinner("Finding samples..."):
         try:
@@ -141,12 +142,42 @@ def display_linked_samples():
     if len(samples) == 0:
         insert_text = "default" if is_default_experiment else ""
         st.warning(
-            "No samples are direclty linked to this " + insert_text + " experiment!"
+            "No samples are directly linked to this " + insert_text + " experiment!"
         )
     st.markdown(
         msg,
         help="Only directly linked samples are fetched.",
     )
+
+
+def display_linked_phases():
+    full_identifier = st.session_state.experiments[st.session_state.experiment]
+    _, obj_identifier = get_info_from_identifier(full_identifier)
+    objects = []
+    if obj_identifier is not None:
+        objects = find_linked_samples(obj_identifier)
+        openbis_object = st.session_state.oBis.get_object(obj_identifier)
+        objects.append(openbis_object)
+    images = []
+    names = []
+    for openbis_object in objects:
+        for parent in openbis_object.get_parents():
+            if parent.type == "CRYSTALLINE_MATERIAL":
+                import base64
+
+                html_string = parent.props.get("structure_animation")
+                if html_string:
+                    base64_data = html_string.split("base64,")[1].split('"')[0]
+                    image_bytes = base64.b64decode(base64_data)
+                    names.append(parent.props.get("$name"))
+                    images.append(image_bytes)
+    if images:
+        st.write("*Phases*")
+        cols = st.columns(len(images))
+        for col, img, name in zip(cols, images, names):
+            with col:
+                st.text(name)
+                st.image(img)
 
 
 def link_file(
@@ -370,6 +401,31 @@ st.write(
     "Please use script-based methods if your data is larger than 5 GB in total (at least until new resources are available)"
 )
 
+# Pre-filter based on project
+projects = ["ALL"] + sorted(
+    {
+        key.split("//")[1]
+        for key in st.session_state.experiments_with_data.keys()
+        if len(key.split("//")) > 1 and "COSCINE" not in key.split("//")[1]
+    }
+)
+
+selected_projects = st.pills(
+    "Select project(s)",
+    projects,
+    selection_mode="multi",
+    default=["ALL"],
+    disabled=not st.session_state.logged_in,
+    help="Please un-select ALL and choose one or more projects to restrict the entries you see.",
+)
+filtered_keys = []
+for key in st.session_state.experiment_name_list:
+    parts = key.split("//")
+    if (len(parts) > 1 and parts[1] in selected_projects) or (
+        "ALL" in selected_projects
+    ):
+        filtered_keys.append(key)
+
 with st.form("Form_DS_Exp"):
 
     st.subheader("Step 2: Choose Dataset Type & Experiment to link data to.")
@@ -411,7 +467,7 @@ with st.form("Form_DS_Exp"):
         msg = "Choose an experiment"
     st.selectbox(
         msg,
-        st.session_state.experiment_name_list,
+        filtered_keys,
         index=None,
         placeholder="Select experiment",
         key="experiment",
@@ -445,7 +501,11 @@ with st.form("Form_DS_Exp"):
             if st.session_state.ds_type is not None and valid_upload_location:
                 # We show linked samples to help prevent erroneous uploads
 
-                display_linked_samples()
+                col_1, col2 = st.columns(2)
+                with col_1:
+                    display_linked_samples()
+                with col2:
+                    display_linked_phases()
 
                 st.session_state.disable_upload = False
                 if st.session_state.ds_type in [
@@ -475,6 +535,53 @@ with st.form("Form_DS_Exp"):
 ## Form 3: Choose metadata extractor, upload file to Streamlit,
 ##         upload to Coscine and link data (and metadata) in openBIS
 
+
+if st.session_state.desktop:
+
+    from tkinter import Tk, filedialog
+    from pathlib import Path
+
+
+    def select_folder():
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory(parent=root)
+        root.destroy()
+        return Path(folder)
+
+
+    def select_files():
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        files = filedialog.askopenfilenames(parent=root)
+        root.destroy()
+        return [Path(f) for f in files]
+
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 0.25])
+    with col1:
+        if st.button(
+            "📁 Select Folder",
+            use_container_width=True,
+            help="Only files directly inside the selected folder are included. Subfolders are not scanned.",
+        ):
+            folder = select_folder()
+            if folder:
+                st.session_state.files = [p for p in folder.glob("*") if p.is_file()]
+    with col2:
+        if st.button("📄 Select Files", use_container_width=True):
+            files = select_files()
+            if files:
+                st.session_state.files = files
+    with col3:
+        if st.button("🗑️ Clear", use_container_width=True):
+            st.session_state.files = []
+    with col4:
+        files = st.session_state.get("files")
+        if files:
+            st.session_state.files = [p for p in files if p.name != "Thumbs.db"]
+            st.caption("ℹ️", help="\n".join(str(f) for f in st.session_state.files))
 
 with st.form("Form_Link"):
     st.subheader("Step 3: Registering file & settings")
@@ -553,6 +660,7 @@ with st.form("Form_Link"):
         case "SEM_DATA":
             metadata_extractors = [
                 "IMM Tescan Clara",
+                "IMM Tescan Clara SharkSEM",
                 "IMM FEI Helios",
                 "IMM Zeiss Leo",
                 "GfE Zeiss Gemini 300",
@@ -562,6 +670,7 @@ with st.form("Form_Link"):
                 "MPIE FEI Scios",
                 "MPIE FEI Scios",
                 "MPIE Zeiss Sigma",
+                "MPIE Zeiss Merlin",
             ]
         case "TEM_DATA":
             metadata_extractors = [
@@ -613,14 +722,17 @@ with st.form("Form_Link"):
         )
     else:
         lammps_unit_style = None
-    uploaded_files = st.file_uploader(
-        "Choose a file",
-        accept_multiple_files=True,
-        disabled=st.session_state.disable_upload,
-        help="If metadata extraction is available, \
-            make sure to upload files that can be parsed by the same metadata extractor",
-        key=st.session_state.uploader_key,
-    )
+    if st.session_state.files is not None:
+        uploaded_files = st.session_state.files
+    else:
+        uploaded_files = st.file_uploader(
+            "Choose a file",
+            accept_multiple_files=True,
+            disabled=st.session_state.disable_upload,
+            help="If metadata extraction is available, \
+                make sure to upload files that can be parsed by the same metadata extractor",
+            key=st.session_state.uploader_key,
+        )
 
     s3_upload_allowed = st.session_state.s3_upload_allowed
     s3_upload_configured = st.session_state.s3_upload_ok
@@ -722,8 +834,12 @@ with st.form("Form_Link"):
                     file_name = file_name.replace(",", "")
                     file_name = "".join(file_name.split())
                 file_path = os.path.join(st.session_state.temp_dir, file_name)
+                if hasattr(uploaded_file, "getbuffer"):
+                    content = uploaded_file.getbuffer()
+                else:
+                    content = uploaded_file.read_bytes()
                 with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                    f.write(content)
                 # generate prefix to ensure each file is unique
 
                 username = st.session_state.oBis._get_username()
